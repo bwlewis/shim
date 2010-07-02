@@ -1,5 +1,10 @@
 THE PVSHM FILE SYSTEM
 
+Warning
+
+Pvshm is a very experimental Linux kernel module. And it breaks several
+conventions. Don't use it on production machines. It can crash your system!
+
 Rationale
 
 The pvshm module defines a middle-layer or shadow file system for the Linux
