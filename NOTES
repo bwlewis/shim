@@ -1,0 +1,27 @@
+The module opens the backing file for read/write as soon as a link
+is created. All local processes using this file and associated page
+cache access the backing file through this one file descriptor. Is this
+a good idea or not?
+
+Write a tricky writepages method that walks the list of dirty
+pages in the page cache and writes them to the backing file as
+a single writev operation instead of a sequence of writes (by-passing
+write_one_page).
+
+Neither error checking nor even basic sanity checking is implemented yet.
+In particular:
+
+	Memory mappings must not exceed backing file size.
+	Backing file can't be deleted while linked.
+
+UML hostfs is similar to this
+FUSE shared-writable mmap is similar to this
+
+Issue an lseek/read to update the page cache prior to a read operation.
+Pvshm does not support reading/writing (only mmap), so we use the read
+to control cache updates.
+
+Similarly, use the standard msync system call to writeback dirty pages
+in the page cache to the backing file.
+
+Everything is done at the page level. Finer granularity is not supported.

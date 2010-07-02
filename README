@@ -1,0 +1,82 @@
+THE PVSHM FILE SYSTEM
+
+Rationale
+
+The pvshm module defines a middle-layer or shadow file system for the Linux
+kernel that sits between applications and an underlying file system. The pvshm
+module implements address space operations on its files as read and write
+operations on corresponding backing files in the underlying file system. The
+pvshm module is designed to provide file memory mapping capability for file
+systems that do not natively support memory mapping. In particular, we wrote
+pvshm to allow us to memory map files in a pvfs2 file system without modifying
+pvfs2 itself.
+ 
+Pvshm does not enforce cache consistency between processes accessing the same
+file. Instead, we leave the management of cache consistency up to the
+applications by providing user space functions for cache updates after write
+operations (a traditional msync function), and before read operations (a kind
+of reverse msync).
+
+
+Design
+
+Loading the pvshm.ko module enables support for the file system. Pvshm
+does not use a backing device and is mounted similarly to ramfs and tmpfs
+file systems.
+
+Symbolic links are a special operation for pvshm. One uses a symbolic link to
+set up a 'shadow' file in pvshm. Address space operations on the link are
+implemented as read or write operations on the backing file. We chose this
+unconvention to make pvshm easy to use with existing tools. When a link
+is created, the backing file is opened for reading and writing by the module.
+
+Deleting a symbolic link closes the open file descriptor to the backing file
+and de-allocates data structures used by pvshm internally. It is essential
+to unlink the file before unmounting the pvshm file system.
+
+Pvshm supports standard inode operations; one may create directories, files,
+pipes, etc. File nodes are not very useful since pvshm  does not support
+reading or writing from files.
+
+For simplicity, all operations work on page-sized (4 kilobyte) chunks.
+
+
+Cache consistency
+
+Pvshm does not automatically enforce cache consistency between multiple
+processes mapping the same file. Instead, pvshm leaves that to applications
+by providing functions for managing the page cache.
+
+The standard msync call is implemented. When called by a process, mysnc causes
+cached pages that have been flagged as changed to be written back to the
+backing file.
+
+Pvshm provides a function to explicitly populate the page cache with data from
+the backing file, replacing any data already in the cache (sort of a reverse
+msync). This function is implemented using the standard read function.  We know
+that redefining the read function seems abusive, but pvshm does not support
+file reading anyway, and using read allows us to provide this functionality to
+applications through standard and universally available system libraries.
+
+Pvshm is a simple, experimental file system. Address space operations
+that ultimately result in read or write operations on a target file work
+on memory page (usually 4k) chunks. In the event of multiple processes
+writing to overlapping chunks, it is up to the processes to coordinate
+their activity, although this may change in soon.
+
+
+Example
+
+# This example creats a one megabyte backing file on the current file system,
+# installs the pvshm module and creates a shadow file suitable for memory
+# mapping in the pvshm file system.
+
+dd if=/dev/zero of=backing_file bs=1M count=1
+insmod pvshm.ko
+mount -t pvshm none /mnt
+ln -s backing_file /mnt
+
+# Be sure to delete the link when done:
+rm /mnt/backing_file
+umount /mnt
+rmmod pvshm
