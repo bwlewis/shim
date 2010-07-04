@@ -49,7 +49,3 @@ main (int argc, char **argv)
   close (fd);
   return 0;
 }
-
-/*
-vim: ts=4
-*/

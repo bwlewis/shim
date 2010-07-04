@@ -13,4 +13,5 @@ endif
 
 test:
 	cc -Wall -o synch synch.c
+	cc -Wall -o msync msync.c
 	cc -Wall -o testmmap testmmap.c
