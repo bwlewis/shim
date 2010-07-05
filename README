@@ -7,8 +7,8 @@ conventions. Don't use it on production machines. It can crash your system!
 
 Rationale
 
-The pvshm module defines a middle-layer or shadow file system for the Linux
-kernel that sits between applications and an underlying file system. The pvshm
+The pvshm module defines an overlay file system for the Linux kernel
+that sits between applications and an underlying file system. The pvshm
 module implements address space operations on its files as read and write
 operations on corresponding backing files in the underlying file system. The
 pvshm module is designed to provide file memory mapping capability for file
