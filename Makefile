@@ -8,7 +8,7 @@ default:
 	$(MAKE) -C ${KERNEL_SOURCE} SUBDIRS=$(PWD) modules
 clean :
 	$(MAKE) -C ${KERNEL_SOURCE} SUBDIRS=$(PWD) clean
-	rm -f  *~ *.o *.ko testmmap synch msync
+	rm -f  *~ *.o *.ko testmmap synch msync testw testr
 endif
 
 test:

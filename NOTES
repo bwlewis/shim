@@ -3,7 +3,7 @@ is created. All local processes using this file and associated page
 cache access the backing file through this one file descriptor. Is this
 a good idea or not?
 
-Error checking, we don't need no stinking error checking.
+Error checking and some features are woefully inadequate:
 In particular:
 
 	Memory mappings must not exceed backing file size.

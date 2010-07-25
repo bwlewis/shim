@@ -6,6 +6,7 @@
 #include <sys/mman.h>
 #include <string.h>
 #include <errno.h>
+#include <unistd.h>
 
 int
 main (int argc, char **argv)
@@ -23,7 +24,7 @@ main (int argc, char **argv)
   fd = open (argv[1], O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
   fstat (fd, &sbuffer);
   A = (int *) mmap (NULL, p, PROT_WRITE, MAP_SHARED, fd, 0);
-  memcpy (&j, A + 1024, sizeof (int));	//force read of 2nd page
+  memcpy (&j, A + 1024, sizeof (int)); // read 2nd page for fun
   for (k = 0; k < 10; k++)
     {
       lseek (fd, 0, SEEK_SET);
@@ -36,7 +37,3 @@ main (int argc, char **argv)
   close (fd);
   return 0;
 }
-
-/*
-vim: ts=4
-*/

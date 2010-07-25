@@ -6,6 +6,7 @@
 #include <sys/mman.h>
 #include <string.h>
 #include <errno.h>
+#include <unistd.h>
 
 int main(int argc, char **argv)
 {
@@ -33,7 +34,3 @@ int main(int argc, char **argv)
 	close (fd);
 	return 0;
 }
-
-/*
-vim: ts=4
-*/
