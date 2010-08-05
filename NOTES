@@ -1,6 +1,3 @@
-Bug: Pages are not reclaimed. Set the PG_reclaim bit? or maybe make sure page
-count goes to zero after writes? Maybe implement releasepage?
-
 THIS IS ONLY TESTED WITH Linux 2.6.31, and probably won't work with older
 kernels due to subtle changes in the VFS.
 
@@ -18,7 +15,7 @@ In particular:
 
 Moral? Don't use this on a machine that you value. It will crash.
 
-UML hostfs is quite similar to this.
+UML hostfs is very similar to this.
 FUSE shared-writable mmap is similar to this (if it really exists?).
 
 Manual cache control:

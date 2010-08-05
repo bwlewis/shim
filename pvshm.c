@@ -52,7 +52,15 @@
 #include <linux/syscalls.h>
 #include <linux/pagemap.h>
 
-void remove_from_page_cache (struct page *page);
+#define BYTETOBINARY(byte)  \
+  (byte & 0x80 ? 1 : 0), \
+  (byte & 0x40 ? 1 : 0), \
+  (byte & 0x20 ? 1 : 0), \
+  (byte & 0x10 ? 1 : 0), \
+  (byte & 0x08 ? 1 : 0), \
+  (byte & 0x04 ? 1 : 0), \
+  (byte & 0x02 ? 1 : 0), \
+  (byte & 0x01 ? 1 : 0) 
 
 #define PVSHM_MAGIC	0x55566655
 
@@ -72,8 +80,6 @@ static int pvshm_setattr (struct dentry *dentry, struct iattr *attr);
 static int pvshm_writepage (struct page *page, struct writeback_control *wbc);
 static int pvshm_readpage (struct file *file, struct page *page);
 static int pvshm_set_page_dirty_nobuffers (struct page *page);
-static int pvshm_writepages (struct address_space *mapping,
-                             struct writeback_control *wbc);
 static int pvshm_releasepage (struct page *page, gfp_t gfp_flags);
 
 /* File operations */
@@ -96,7 +102,7 @@ typedef struct
 const struct address_space_operations pvshm_aops = {
   .readpage = pvshm_readpage,
   .writepage = pvshm_writepage,
-  .writepages = pvshm_writepages,
+  .writepages = generic_writepages,
   .set_page_dirty = pvshm_set_page_dirty_nobuffers,
   .releasepage = pvshm_releasepage,
 };
@@ -112,14 +118,11 @@ static const struct inode_operations pvshm_file_inode_operations = {
   .setattr = pvshm_setattr,
 };
 
-static struct backing_dev_info pvshm_backing_dev_info = {
-  .ra_pages = 1,                // No readahead 
-  .capabilities = BDI_CAP_NO_ACCT_DIRTY | BDI_CAP_NO_ACCT_WB |
-    BDI_CAP_MAP_DIRECT | BDI_CAP_MAP_COPY |
-    BDI_CAP_READ_MAP | BDI_CAP_WRITE_MAP | BDI_CAP_EXEC_MAP,
-//  .capabilities = BDI_CAP_MAP_DIRECT | BDI_CAP_MAP_COPY |
-//    BDI_CAP_READ_MAP | BDI_CAP_WRITE_MAP | BDI_CAP_EXEC_MAP,
-};
+// XXX Not presently used, but may be in the future to disable readahead.
+//static struct backing_dev_info pvshm_backing_dev_info = {
+//  .ra_pages = 1,                // Maybe we should not have readahead?
+//  .capabilities = BDI_CAP_SWAP_BACKED;
+//};
 
 /* Inode operations */
 
@@ -218,9 +221,9 @@ pvshm_file_mmap (struct file *f, struct vm_area_struct *v)
 static int
 pvshm_sync_file (struct file *f, struct dentry *d, int k)
 {
-//        mm_segment_t old_fs;
-  int j = 0;
+//  mm_segment_t old_fs;
   pvshm_target *pv_tgt;
+  int j = 0;
   struct inode *inode = f->f_mapping->host;
   pv_tgt = (pvshm_target *) inode->i_private;
   if (verbose)
@@ -247,7 +250,7 @@ pvshm_get_inode (struct super_block *sb, int mode, dev_t dev)
 //      inode->i_gid = current->fsgid;
       inode->i_blocks = 0;
       inode->i_mapping->a_ops = &pvshm_aops;
-      inode->i_mapping->backing_dev_info = &pvshm_backing_dev_info;
+//      inode->i_mapping->backing_dev_info = &pvshm_backing_dev_info;
       inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
       switch (mode & S_IFMT)
         {
@@ -269,6 +272,8 @@ pvshm_get_inode (struct super_block *sb, int mode, dev_t dev)
           break;
         }
     }
+if(verbose)
+ printk("pvshm_get_inode capabilities=%d%d%d%d%d%d%d%d\n",BYTETOBINARY(inode->i_mapping->backing_dev_info->capabilities));
   return inode;
 }
 
@@ -379,7 +384,7 @@ pvshm_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
   inode->i_mode = stat.mode;
   inode->i_fop = &pvshm_file_operations;
   inode->i_mapping->a_ops = &pvshm_aops;
-  inode->i_mapping->backing_dev_info = &pvshm_backing_dev_info;
+//  inode->i_mapping->backing_dev_info = &pvshm_backing_dev_info;
   if (verbose)
     printk ("pvshm_symlink d_name=%s, symname=%s\n",
             dentry->d_name.name, symname);
@@ -484,8 +489,8 @@ static int
 pvshm_set_page_dirty_nobuffers (struct page *page)
 {
   int j = 0;
-  if (!PageLocked (page))
-    trylock_page (page);
+//  if (!PageLocked (page))
+//    trylock_page (page);
   j = __set_page_dirty_nobuffers (page);
   if (verbose)
     printk ("pvshm_spdirty_nb: %d [%s] [%s] [%s] [%s]\n",
@@ -494,8 +499,8 @@ pvshm_set_page_dirty_nobuffers (struct page *page)
             PageDirty (page) ? "Dirty" : "Not Dirty",
             PageWriteback (page) ? "PWrbk Set" : "PWrbk Cleared",
             PageLocked (page) ? "Locked" : "Unlocked");
-  if (PageLocked (page))
-    unlock_page (page);
+//  if (PageLocked (page))
+//    unlock_page (page);
   return j;
 }
 
@@ -509,70 +514,11 @@ pvshm_releasepage (struct page *page, gfp_t gfp_flags)
   return 0;
 }
 
-// XXX This is pretty dodgy. It is triggered by msync.  For some reason
-// pagedirty flag is not set right and generic_writepages does not end up
-// calling writepage on dirty pages. So, we emulate write_cache_pages here and
-// force dirty pages to be written by pvshm_writepage. This needs further study
-// and a fix (that is, this should not need to be used).
-static int
-pvshm_writepages (struct address_space *mapping,
-                  struct writeback_control *wbc)
-{
-  int nr_pages, i, cycled, range_whole;
-  pgoff_t end, index;
-  struct page *page;
-  struct pagevec pvec;
-  pgoff_t uninitialized_var (writeback_index);
-  if (verbose)
-    printk ("pvshm_writepages\n");
-  pagevec_init (&pvec, 0);
-  if (wbc->range_cyclic)
-    {
-      writeback_index = mapping->writeback_index;
-      index = writeback_index;
-      if (index == 0)
-        cycled = 1;
-      else
-        cycled = 0;
-      end = -1;
-    }
-  else
-    {
-      index = wbc->range_start >> PAGE_CACHE_SHIFT;
-      end = wbc->range_end >> PAGE_CACHE_SHIFT;
-      if (wbc->range_start == 0 && wbc->range_end == LLONG_MAX)
-        range_whole = 1;
-      cycled = 1;               /* ignore range_cyclic tests */
-    }
-  nr_pages = pagevec_lookup_tag (&pvec, mapping, &index,
-                                 PAGECACHE_TAG_DIRTY,
-                                 min (end - index,
-                                      (pgoff_t) PAGEVEC_SIZE - 1) + 1);
-  if (verbose)
-    printk ("Nr dirty pages = %d\n", nr_pages);
-  for (i = 0; i < nr_pages; i++)
-    {
-      page = pvec.pages[i];
-      if (verbose)
-        printk ("pvshm_writepages: %d [%s] [%s] [%s] [%s]\n",
-                (int) page->index,
-                PageUptodate (page) ? "Uptodate" : "Not Uptodate",
-                PageDirty (page) ? "Dirty" : "Not Dirty",
-                PageWriteback (page) ? "PWrbk Set" :
-                "PWrbk Cleared", PageLocked (page) ? "Locked" : "Unlocked");
-      if (!PageLocked (page))
-        trylock_page (page);
-      write_one_page (page, 0);
-//      pvshm_writepage (page, wbc);
-    }
-//return generic_writepages(mapping, wbc);
-  return 0;
-}
-
 static int
 pvshm_writepage (struct page *page, struct writeback_control *wbc)
 {
   ssize_t j;
+//  struct pagevec pv;
   loff_t offset;
   mm_segment_t old_fs;
   struct inode *inode;
@@ -583,26 +529,32 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
   pvmd = (pvshm_target *) inode->i_private;
   page_addr = kmap (page);
   offset = page->index << PAGE_CACHE_SHIFT;
-  j = 0;
+//  pagevec_init(&pv, 0);
+//  pv.nr = find_get_pages_contig(page->mapping, page->index, 1, pv.pages);
+  j = 1;
+  test_set_page_writeback (page);
   if (pvmd->file)
     {
-      test_set_page_writeback (page);
       if (verbose)
         printk ("About to vfs_write idx %d pageaddr %p\n", (int) page->index,
                 page_addr);
       old_fs = get_fs ();
       set_fs (get_ds ());
+// XXX Note: vfs_write is not the pagecache leak culprit:
       j = vfs_write (pvmd->file, page_addr, PAGE_SIZE, &offset);
 //      written = do_sync_write (target->file, p, PAGE_SIZE, &offset);
       set_fs (old_fs);
-      end_page_writeback (page);
     }
   kunmap (page);
-  put_page (page);
+  end_page_writeback (page);
+//  if(PageReferenced(page))
+//    ClearPageReferenced(page);
   if (PageError (page))
     ClearPageError (page);
   if (PageLocked (page))
     unlock_page (page);
+//  put_page (page);
+//  __pagevec_release(&pv);
   if (verbose)
     printk ("pvshm_writepage: %d link=%s [%s] [%s] [%s] [%s] [%s] [%s] %d\n",
             (int) page->index,
