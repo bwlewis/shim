@@ -24,9 +24,12 @@ main (int argc, char **argv)
   fd = open (argv[1], O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
   fstat (fd, &sbuffer);
   A = (int *) mmap (NULL, p, PROT_WRITE, MAP_SHARED, fd, 0);
-  memcpy (&j, A + 1024, sizeof (int)); // read 2nd page for fun
+// Read the first page repeatedly to investigate cache behavior (especially
+// useful with a pvfs2 backing):
   for (k = 0; k < 10; k++)
     {
+// Force a cache update with lseek/read. This is really only meaningful
+// for parallel or remote backing file systems.
       lseek (fd, 0, SEEK_SET);
       read (fd, (void *) A, p);
       memcpy (&j, A, sizeof (int));

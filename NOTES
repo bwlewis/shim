@@ -1,6 +1,12 @@
 THIS IS ONLY TESTED WITH Linux 2.6.31, and probably won't work with older
 kernels due to subtle changes in the VFS.
 
+- Indeed, pvshm crashes on x86_64 2.6.28x kernels used in Ubuntu 9.04,
+  don't use it on that OS.
+- Tested working on x86 and x86_64 2.6.31x kernels used in Ubuntu 9.10
+  and on x86_64 2.6.32x kernels used in Ubuntu 10.04.
+
+
 The module opens the backing file for read/write as soon as a link
 is created. All local processes using this file and associated page
 cache access the backing file through this one file descriptor. Is this
