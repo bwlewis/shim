@@ -46,6 +46,7 @@
 #include <linux/backing-dev.h>
 #include <linux/pagevec.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <asm/uaccess.h>
 #include <linux/mm.h>
 #include <linux/writeback.h>
