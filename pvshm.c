@@ -119,9 +119,9 @@ static const struct inode_operations pvshm_file_inode_operations = {
   .setattr = pvshm_setattr,
 };
 
-// XXX Not presently used, but may be in the future to disable readahead.
+// XXX Not presently used, but may be in the future to disable/adjust readahead.
 //static struct backing_dev_info pvshm_backing_dev_info = {
-//  .ra_pages = 1,                // Maybe we should not have readahead?
+//  .ra_pages = 0,
 //  .capabilities = BDI_CAP_SWAP_BACKED;
 //};
 
@@ -177,10 +177,9 @@ pvshm_read_again (struct file *file, struct address_space *mapping,
     }
 }
 
-/* Warning
- * pvshm_read is **not** a read function. It clears the page up 
- * to date flag for pages covering the specified region and
- * explicitly re-reads the pages from the backing file.
+/* Warning pvshm_read is not a read function. It clears the page up to date
+ * flag for pages covering the specified region and explicitly re-reads the
+ * pages from the backing file. It's complementary to msync.
  */
 static ssize_t
 pvshm_read (struct file *filp, char __user * buf, size_t len, loff_t * skip)
@@ -541,7 +540,6 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
                 page_addr);
       old_fs = get_fs ();
       set_fs (get_ds ());
-// XXX Note: vfs_write is not the pagecache leak culprit:
       j = vfs_write (pvmd->file, page_addr, PAGE_SIZE, &offset);
 //      written = do_sync_write (target->file, p, PAGE_SIZE, &offset);
       set_fs (old_fs);
