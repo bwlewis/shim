@@ -1,16 +1,16 @@
+- Planning to add pass-through write and truncate ops to the backing file,
+  mutatis mutandis the pass-through read operation.
+
 THIS IS ONLY TESTED WITH Linux 2.6.31, and probably won't work with older
-kernels due to subtle changes in the VFS.
-
-- Indeed, pvshm crashes on x86_64 2.6.28x kernels used in Ubuntu 9.04,
-  don't use it on that OS.
-- Tested working on x86 and x86_64 2.6.31x kernels used in Ubuntu 9.10
-  and on x86_64 2.6.32x kernels used in Ubuntu 10.04.
-
+kernels due to subtle changes in the VFS.  Indeed, pvshm crashes on x86_64
+2.6.28x kernels used in Ubuntu 9.04, don't use it on that OS.  It's tested
+working on x86 and x86_64 2.6.31x kernels used in Ubuntu 9.10 and on x86_64
+2.6.32x kernels used in Ubuntu 10.04.
 
 The module opens the backing file for read/write as soon as a link
 is created. All local processes using this file and associated page
-cache access the backing file through this one file descriptor. Is this
-a good idea or not?
+cache access the backing file through this one file descriptor. Maybe
+this is a bad idea...
 
 Error checking and some important features are woefully inadequate:
 In particular:
@@ -25,10 +25,10 @@ UML hostfs is very similar to this.
 FUSE shared-writable mmap is similar to this (if it really exists?).
 
 Manual cache control:
-Issue an lseek/read with a null buffer to update the page cache prior to a read
-operation.
+Issue an lseek/read with a null buffer to update the page cache from the
+backing file (reverse msync).
 
-Similarly, use the standard msync system call to writeback dirty pages
+Use the standard msync system call to force writeback of dirty pages
 in the page cache to the backing file.
 
 Everything is done at the page level. Finer granularity is not supported.
