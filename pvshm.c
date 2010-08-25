@@ -177,9 +177,15 @@ pvshm_read_again (struct file *file, struct address_space *mapping,
     }
 }
 
-/* Warning pvshm_read is not a read function. It clears the page up to date
- * flag for pages covering the specified region and explicitly re-reads the
- * pages from the backing file. It's complementary to msync.
+/* Pvshm uses the read function for two purposes:
+ * 1. Provide a (somewhat slow) traditional read operation against
+ *    the backing file.
+ * 2. Provide a mechanism for forcing a page cache update from the
+ *    backing file.
+ * The second purpose provides a sort of reverse msync to applications,
+ * especially useful with parallel file systems. It's triggered exactly
+ * like read, but with a NULL buffer. The pages containing the read
+ * request will be updated from the backing file to the page cache.
  */
 static ssize_t
 pvshm_read (struct file *filp, char __user * buf, size_t len, loff_t * skip)
@@ -188,6 +194,7 @@ pvshm_read (struct file *filp, char __user * buf, size_t len, loff_t * skip)
   pgoff_t pstart, pend;
   ssize_t ret = 0;
   struct inode *inode = filp->f_mapping->host;
+  pvshm_target *pvmd = (pvshm_target *) inode->i_private;
   struct address_space *mapping = inode->i_mapping;
   lstart = *skip;
   lend = lstart + (loff_t) len;
@@ -205,7 +212,14 @@ pvshm_read (struct file *filp, char __user * buf, size_t len, loff_t * skip)
   pvshm_read_again (filp, mapping, pstart, pend);
   mutex_unlock (&filp->f_mapping->host->i_mutex);
   if (verbose)
-    printk ("pvshm_read...OK\n");
+    printk ("pvshm_read cache update OK\n");
+// A non-zero buffer address triggers a standard read operation on
+// the backing file:
+  if(buf) {
+    ret = vfs_read (pvmd->file, buf, len, skip);
+    if (verbose)
+      printk ("pvshm_read backing file into user buffer\n");
+  }
   return ret;
 }
 
@@ -355,8 +369,6 @@ pvshm_unlink (struct inode *dir, struct dentry *d)
  * 
  * Open a r/w file stream to the target
  * XXX Should this be done here or somewhere else?
- * XXX Eventually all userspace file operations will be offloaded to a
- * XXX daemon running in userspace.
  */
 static int
 pvshm_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
@@ -600,11 +612,11 @@ pvshm_readpage (struct file *file, struct page *page)
       if (verbose)
         printk ("readpage %d bytes at index %d complete\n", j,
                 (int) page->index);
-/* XXX Check for incomplete read. How shall we handle this? */
-      if (j < PAGE_SIZE)
-        ClearPageUptodate (page);
-      else
-        SetPageUptodate (page);
+/* XXX It may be that the backing file is not a multiple of the page size,
+ * resulting in j < PAGE_SIZE. We should probably clear the remainder of
+ * the page here, or prior to this with page_zero...
+ */
+      SetPageUptodate (page);
     }
   if (PageLocked (page))
     unlock_page (page);

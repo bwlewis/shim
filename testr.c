@@ -31,9 +31,13 @@ main (int argc, char **argv)
 // Force a cache update with lseek/read. This is really only meaningful
 // for parallel or remote backing file systems.
       lseek (fd, 0, SEEK_SET);
-      read (fd, (void *) A, p);
+      read (fd, NULL, p);
       memcpy (&j, A, sizeof (int));
-      fprintf (stderr, "j=%d press any key to invalidate...\n", j);
+      printf ("mmaped int = %d\n", j);
+// Force an actual read of the backing file into a buffer
+      lseek (fd, 0, SEEK_SET);
+      read (fd, &j, sizeof(int));
+      printf ("read int = %d (press any key to invalidate and repeat)\n", j);
       getchar ();
     }
   munmap (A, p);

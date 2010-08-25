@@ -25,9 +25,8 @@ UML hostfs is very similar to this.
 FUSE shared-writable mmap is similar to this (if it really exists?).
 
 Manual cache control:
-Issue an lseek/read to update the page cache prior to a read operation.
-Pvshm does not support reading/writing (only mmap), so we use the read
-to control cache updates.
+Issue an lseek/read with a null buffer to update the page cache prior to a read
+operation.
 
 Similarly, use the standard msync system call to writeback dirty pages
 in the page cache to the backing file.
