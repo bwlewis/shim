@@ -32,6 +32,7 @@
  * leaving that to the applications anyway, and try to keep things very simple.
  */
 
+#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/fcntl.h>
@@ -50,7 +51,7 @@
 #include <linux/mm.h>
 #include <linux/writeback.h>
 #include <linux/syscalls.h>
-#include <linux/pagemap.h>
+#include <linux/mpage.h>
 
 #define BYTETOBINARY(byte)  \
   (byte & 0x80 ? 1 : 0), \
@@ -64,12 +65,20 @@
 
 #define PVSHM_MAGIC	0x55566655
 
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27))
+static inline int trylock_page(struct page *page)
+ {
+   return (likely(!test_and_set_bit(PG_locked, &page->flags)));
+ }
+#endif
+
 int verbose = 0;
 
 /* Superblock and file inode operations */
-static const struct super_operations pvshm_ops;
-static const struct inode_operations pvshm_dir_inode_operations;
-static const struct inode_operations pvshm_file_inode_operations;
+// XXX should really be static const ...
+struct super_operations pvshm_ops;
+struct inode_operations pvshm_dir_inode_operations;
+struct inode_operations pvshm_file_inode_operations;
 static int pvshm_get_sb (struct file_system_type *fs_type,
                          int flags, const char *dev_name, void *data,
                          struct vfsmount *mnt);
@@ -113,7 +122,7 @@ const struct file_operations pvshm_file_operations = {
   .read = pvshm_read,
 };
 
-static const struct inode_operations pvshm_file_inode_operations = {
+struct inode_operations pvshm_file_inode_operations = {
   .getattr = simple_getattr,
   .setattr = pvshm_setattr,
 };
@@ -434,7 +443,7 @@ end:
   return error;
 }
 
-static const struct inode_operations pvshm_dir_inode_operations = {
+struct inode_operations pvshm_dir_inode_operations = {
   .create = pvshm_create,
   .link = simple_link,
   .unlink = pvshm_unlink,
@@ -552,14 +561,13 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
   if (PageLocked (page))
     unlock_page (page);
   if (verbose)
-    printk ("pvshm_writepage: %d link=%s [%s] [%s] [%s] [%s] [%s] [%s] %d\n",
+    printk ("pvshm_writepage: %d link=%s [%s] [%s] [%s] [%s] [%s] %d\n",
             (int) page->index,
             (char *) pvmd->path,
             PageUptodate (page) ? "Uptodate" : "Not Uptodate",
             PageDirty (page) ? "Dirty" : "Not Dirty",
             PagePrivate (page) ? "Private" : "Not Private",
             PageReferenced (page) ? "Referenced" : "Not Referenced",
-            PageUnevictable (page) ? "Unevictable" : "Not Unevictable",
             PageLocked (page) ? "Locked" : "Unlocked", page_count (page));
   return 0;
 }
