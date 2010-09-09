@@ -27,10 +27,9 @@
  *
  * OK, I know what you're about to ask: why not just use fuse? The fuse
  * (experimental) writable mmap code is not easy to follow, and is focused
- * on a very general-purpose, cache-consistent model. We intentionally dispense
- * with consistency, leaving that to the applications, and try to keep things
- * very simple.
- *
+ * on a very general-purpose, cache-consistent model, and I'm not sure if it
+ * is still even being developed. We intentionally dispense with consistency 
+ * leaving that to the applications anyway, and try to keep things very simple.
  */
 
 #include <linux/module.h>
@@ -61,7 +60,7 @@
   (byte & 0x08 ? 1 : 0), \
   (byte & 0x04 ? 1 : 0), \
   (byte & 0x02 ? 1 : 0), \
-  (byte & 0x01 ? 1 : 0) 
+  (byte & 0x01 ? 1 : 0)
 
 #define PVSHM_MAGIC	0x55566655
 
@@ -192,6 +191,7 @@ pvshm_read (struct file *filp, char __user * buf, size_t len, loff_t * skip)
 {
   loff_t lstart, lend;
   pgoff_t pstart, pend;
+  mm_segment_t old_fs;
   ssize_t ret = 0;
   struct inode *inode = filp->f_mapping->host;
   pvshm_target *pvmd = (pvshm_target *) inode->i_private;
@@ -206,8 +206,8 @@ pvshm_read (struct file *filp, char __user * buf, size_t len, loff_t * skip)
     printk ("nrpages=%d \n", (int) mapping->nrpages);
   mutex_lock (&filp->f_mapping->host->i_mutex);
 // I tried simply the following first, but it's not enough. Note that we are
-// generally not free to eject the page either as it may 
-// be in use. Hence the pvshm_read_again function.
+// generally not free to eject the page either as it may be in use by somebody,
+// hence the pvshm_read_again function.
 //      invalidate_mapping_pages (mapping, pstart, pend); 
   pvshm_read_again (filp, mapping, pstart, pend);
   mutex_unlock (&filp->f_mapping->host->i_mutex);
@@ -215,11 +215,15 @@ pvshm_read (struct file *filp, char __user * buf, size_t len, loff_t * skip)
     printk ("pvshm_read cache update OK\n");
 // A non-zero buffer address triggers a standard read operation on
 // the backing file:
-  if(buf) {
-    ret = vfs_read (pvmd->file, buf, len, skip);
-    if (verbose)
-      printk ("pvshm_read backing file into user buffer\n");
-  }
+  if (buf)
+    {
+      old_fs = get_fs ();
+      set_fs (KERNEL_DS);
+      ret = vfs_read (pvmd->file, (char __user *) buf, len, skip);
+      set_fs (old_fs);
+      if (verbose)
+        printk ("pvshm_read backing file into user buffer\n");
+    }
   return ret;
 }
 
@@ -243,16 +247,11 @@ pvshm_sync_file (struct file *f, struct dentry *d, int k)
   if (verbose)
     printk ("pvshm_sync_file %s\n", pv_tgt->path);
   j = filemap_write_and_wait (f->f_mapping);
-//        old_fs = get_fs();
-//        set_fs(KERNEL_DS);
-//        j = vfs_fsync(f, d, k);
-//        set_fs(old_fs);
-//        return simple_sync_file(f, d, k);
   return j;
 }
 
-/* inode operations */
 
+/* inode operations */
 struct inode *
 pvshm_get_inode (struct super_block *sb, int mode, dev_t dev)
 {
@@ -286,8 +285,9 @@ pvshm_get_inode (struct super_block *sb, int mode, dev_t dev)
           break;
         }
     }
-if(verbose)
- printk("pvshm_get_inode capabilities=%d%d%d%d%d%d%d%d\n",BYTETOBINARY(inode->i_mapping->backing_dev_info->capabilities));
+  if (verbose)
+    printk ("pvshm_get_inode capabilities=%d%d%d%d%d%d%d%d\n",
+            BYTETOBINARY (inode->i_mapping->backing_dev_info->capabilities));
   return inode;
 }
 
@@ -346,18 +346,14 @@ pvshm_create (struct inode *dir, struct dentry *dentry, int mode,
 static int
 pvshm_unlink (struct inode *dir, struct dentry *d)
 {
-  mm_segment_t old_fs;
   struct inode *ino = d->d_inode;
   pvshm_target *pvmd = (pvshm_target *) ino->i_private;
   if (pvmd)
     {
       if (verbose)
         printk ("pvshm_unlink %s\n", pvmd->path);
-      old_fs = get_fs ();
-      set_fs (get_ds ());
       if (pvmd->file)
-        filp_close (pvmd->file, 0);
-      set_fs (old_fs);
+        filp_close (pvmd->file, current->files);
       kfree (pvmd->path);
       kfree (pvmd);
     }
@@ -367,8 +363,7 @@ pvshm_unlink (struct inode *dir, struct dentry *d)
 /* Create a pvshm entry and set up a mapping between the pvshm file 
  * and the target file in specified by symname.
  * 
- * Open a r/w file stream to the target
- * XXX Should this be done here or somewhere else?
+ * Open a r/w file stream to the target, XXX eventually move out to user space.
  */
 static int
 pvshm_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
@@ -382,6 +377,7 @@ pvshm_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
   mm_segment_t old_fs = get_fs ();
   set_fs (KERNEL_DS);
   error = vfs_stat ((char *) symname, &stat);
+  set_fs (old_fs);
   if (error)
     {
       if (verbose)
@@ -411,7 +407,7 @@ pvshm_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
       pvmd->path = (char *) kmalloc (l, 0);
       memcpy (pvmd->path, symname, l);
 // Open a file stream now
-      pvmd->file = filp_open (symname, O_RDWR, 0644);
+      pvmd->file = filp_open (symname, O_RDWR | O_LARGEFILE, 0644);
       if (!pvmd->file)
         {
           error = -2;
@@ -420,7 +416,6 @@ pvshm_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
 // XXX add code to better handle errors here!
         }
 
-      set_fs (old_fs);
       inode->i_private = pvmd;
       if (!error)
         {
@@ -493,7 +488,6 @@ pvshm_get_sb (struct file_system_type *fs_type,
               int flags, const char *dev_name, void *data,
               struct vfsmount *mnt)
 {
-//      return get_sb_single(fs_type, flags, data, pvshm_fill_super, mnt);
   return get_sb_nodev (fs_type, flags, data, pvshm_fill_super, mnt);
 }
 
@@ -501,8 +495,6 @@ static int
 pvshm_set_page_dirty_nobuffers (struct page *page)
 {
   int j = 0;
-//  if (!PageLocked (page))
-//    trylock_page (page);
   j = __set_page_dirty_nobuffers (page);
   if (verbose)
     printk ("pvshm_spdirty_nb: %d [%s] [%s] [%s] [%s]\n",
@@ -511,8 +503,6 @@ pvshm_set_page_dirty_nobuffers (struct page *page)
             PageDirty (page) ? "Dirty" : "Not Dirty",
             PageWriteback (page) ? "PWrbk Set" : "PWrbk Cleared",
             PageLocked (page) ? "Locked" : "Unlocked");
-//  if (PageLocked (page))
-//    unlock_page (page);
   return j;
 }
 
@@ -541,31 +531,26 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
   pvmd = (pvshm_target *) inode->i_private;
   page_addr = kmap (page);
   offset = page->index << PAGE_CACHE_SHIFT;
-//  pagevec_init(&pv, 0);
-//  pv.nr = find_get_pages_contig(page->mapping, page->index, 1, pv.pages);
   j = 1;
   test_set_page_writeback (page);
   if (pvmd->file)
     {
       if (verbose)
-        printk ("About to vfs_write idx %d pageaddr %p\n", (int) page->index,
+        printk ("About to write idx %d pageaddr %p\n", (int) page->index,
                 page_addr);
       old_fs = get_fs ();
       set_fs (get_ds ());
-      j = vfs_write (pvmd->file, page_addr, PAGE_SIZE, &offset);
+      j =
+        vfs_write (pvmd->file, (char __user *) page_addr, PAGE_SIZE, &offset);
 //      written = do_sync_write (target->file, p, PAGE_SIZE, &offset);
       set_fs (old_fs);
     }
   kunmap (page);
   end_page_writeback (page);
-//  if(PageReferenced(page))
-//    ClearPageReferenced(page);
   if (PageError (page))
     ClearPageError (page);
   if (PageLocked (page))
     unlock_page (page);
-//  put_page (page);
-//  __pagevec_release(&pv);
   if (verbose)
     printk ("pvshm_writepage: %d link=%s [%s] [%s] [%s] [%s] [%s] [%s] %d\n",
             (int) page->index,
@@ -589,9 +574,10 @@ pvshm_readpage (struct file *file, struct page *page)
   struct inode *inode = file->f_mapping->host;
   pvshm_target *pvmd = (pvshm_target *) inode->i_private;
   if (verbose)
-    printk ("pvshm_readpage %d %s [%s] [%s] [%s]\n",
+    printk ("pvshm_readpage %d %s %ld [%s] [%s] [%s]\n",
             (int) page->index,
             (char *) pvmd->path,
+            page->mapping->nrpages,
             PageUptodate (page) ? "Uptodate" : "Not Uptodate",
             PageDirty (page) ? "Dirty" : "Not Dirty",
             PageLocked (page) ? "Locked" : "Unlocked");
@@ -601,14 +587,18 @@ pvshm_readpage (struct file *file, struct page *page)
     {
       j = 0;
       offset = page->index << PAGE_CACHE_SHIFT;
-      old_fs = get_fs ();
-      set_fs (KERNEL_DS);
       if (verbose)
         printk ("pvshm_readpage offset=%ld, page_addr=%p\n", (long) offset,
                 page_addr);
       if (pvmd->file)
-        j = vfs_read (pvmd->file, page_addr, PAGE_SIZE, &offset);
-      set_fs (old_fs);
+        {
+          old_fs = get_fs ();
+          set_fs (KERNEL_DS);
+          j =
+            vfs_read (pvmd->file, (char __user *) page_addr, PAGE_SIZE,
+                      &offset);
+          set_fs (old_fs);
+        }
       if (verbose)
         printk ("readpage %d bytes at index %d complete\n", j,
                 (int) page->index);
