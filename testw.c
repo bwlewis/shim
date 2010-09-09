@@ -11,30 +11,37 @@
 int
 main (int argc, char **argv)
 {
-  int fd, j, k;
-  int *A, *a;
+  int fd, k;
   struct stat sb;
-  int p;
+  char *A;
+  char *B;
+  char *C;
+  size_t p, q, j;
   if (argc < 3)
     {
-      printf ("usage: testw <file> <pages>\n");
+      printf ("Write characters to a memory-mapped file in chunks.\n");
+      printf ("usage: testw <file> <nr chunks>\n");
       return -1;
     }
+  k = atoi(argv[2]);
   fd = open (argv[1], O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
   fstat (fd, &sb);
-  A = (int *) mmap (NULL, sb.st_size, PROT_WRITE, MAP_SHARED, fd, 0);
-  p = atoi (argv[2]);
-  a = (int *) A;
+  p = sb.st_size / k;
+  q = sb.st_size / p;
+  if(q<1) {
+      printf ("File not big enough\n");
+      return -1;
+  }
+  B = (char *) malloc(p);
+  A = (char *) mmap (NULL, sb.st_size, PROT_WRITE, MAP_SHARED, fd, 0);
+  C = A;
   j = 0;
-  while (j < p)
+  while (j < q)
     {
       j++;
-      memcpy (a, &j, sizeof (int));
-      fprintf (stderr, "j=%d, address=%p\n", *a, a);
-      a = a + 1024;
-// Comment out the following msync line to see its effect.
-//              k=msync(A,p,MS_SYNC);
-//                usleep(1);
+      memcpy (C, B, p);
+      printf("Wrote %ld bytes at address %p\n",(long)p,C);
+      C = C + p;
     }
   printf ("OK, press ENTER to msync\n");
   getc (stdin);
@@ -42,6 +49,7 @@ main (int argc, char **argv)
   printf ("OK, press ENTER to exit\n");
   getc (stdin);
   munmap (A, sb.st_size);
+  free(B);
   close (fd);
   return 0;
 }
