@@ -66,10 +66,11 @@
 #define PVSHM_MAGIC	0x55566655
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27))
-static inline int trylock_page(struct page *page)
- {
-   return (likely(!test_and_set_bit(PG_locked, &page->flags)));
- }
+static inline int
+trylock_page (struct page *page)
+{
+  return (likely (!test_and_set_bit (PG_locked, &page->flags)));
+}
 #endif
 
 int verbose = 0;
@@ -95,6 +96,7 @@ static int pvshm_releasepage (struct page *page, gfp_t gfp_flags);
 static int pvshm_file_mmap (struct file *, struct vm_area_struct *);
 static int pvshm_sync_file (struct file *, struct dentry *, int);
 static ssize_t pvshm_read (struct file *, char __user *, size_t, loff_t *);
+ssize_t pvshm_write (struct file *, const char __user *, size_t, loff_t *);
 
 /*
  * path: The target file full path
@@ -120,6 +122,7 @@ const struct file_operations pvshm_file_operations = {
   .mmap = pvshm_file_mmap,
   .fsync = pvshm_sync_file,
   .read = pvshm_read,
+  .write = pvshm_write,
 };
 
 struct inode_operations pvshm_file_inode_operations = {
@@ -201,10 +204,12 @@ pvshm_read (struct file *filp, char __user * buf, size_t len, loff_t * skip)
   loff_t lstart, lend;
   pgoff_t pstart, pend;
   mm_segment_t old_fs;
-  ssize_t ret = 0;
+  ssize_t ret = -EBADF;
   struct inode *inode = filp->f_mapping->host;
-  pvshm_target *pvmd = (pvshm_target *) inode->i_private;
   struct address_space *mapping = inode->i_mapping;
+  pvshm_target *pvmd = (pvshm_target *) inode->i_private;
+  if (!pvmd)
+    goto out;
   lstart = *skip;
   lend = lstart + (loff_t) len;
   pstart = (lstart + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
@@ -233,16 +238,45 @@ pvshm_read (struct file *filp, char __user * buf, size_t len, loff_t * skip)
       if (verbose)
         printk ("pvshm_read backing file into user buffer\n");
     }
+out:
+  return ret;
+}
+
+/* The pvshm_write function passes the write operation to the backing file. */
+ssize_t
+pvshm_write (struct file * filp, const char __user * buf, size_t len,
+             loff_t * skip)
+{
+  mm_segment_t old_fs;
+  ssize_t ret = -EBADF;
+  struct inode *inode = filp->f_mapping->host;
+  pvshm_target *pvmd = (pvshm_target *) inode->i_private;
+  if (!pvmd)
+    goto out;
+  if (buf)
+    {
+      old_fs = get_fs ();
+      set_fs (KERNEL_DS);
+      ret = vfs_write (pvmd->file, (char __user *) buf, len, skip);
+      set_fs (old_fs);
+      if (verbose)
+        printk ("pvshm_write to backing file %s\n", pvmd->path);
+    }
+out:
   return ret;
 }
 
 static int
 pvshm_file_mmap (struct file *f, struct vm_area_struct *v)
 {
+  int ret = -EBADF;
   pvshm_target *pvmd = (pvshm_target *) f->f_mapping->host->i_private;
+  if(!pvmd) goto out;
   if (verbose)
     printk ("pvshm_file_mmap %s\n", pvmd->path);
-  return generic_file_mmap (f, v);
+  ret = generic_file_mmap (f, v);
+out:
+  return ret;
 }
 
 static int
@@ -372,7 +406,7 @@ pvshm_unlink (struct inode *dir, struct dentry *d)
 /* Create a pvshm entry and set up a mapping between the pvshm file 
  * and the target file in specified by symname.
  * 
- * Open a r/w file stream to the target, XXX eventually move out to user space.
+ * Open a r/w file stream to the target.
  */
 static int
 pvshm_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
@@ -541,10 +575,10 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
 //  page_addr = kmap (page);
   offset = page->index << PAGE_CACHE_SHIFT;
   j = 1;
-  test_set_page_writeback(page);
+  test_set_page_writeback (page);
   if (pvmd->file)
     {
-      page_addr = kmap_atomic(page, KM_USER0);
+      page_addr = kmap_atomic (page, KM_USER0);
       if (verbose)
         printk ("About to write idx %d pageaddr %p\n", (int) page->index,
                 page_addr);
@@ -554,7 +588,7 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
         vfs_write (pvmd->file, (char __user *) page_addr, PAGE_SIZE, &offset);
 //      written = do_sync_write (target->file, p, PAGE_SIZE, &offset);
       set_fs (old_fs);
-      kunmap_atomic(page_addr, KM_USER0);
+      kunmap_atomic (page_addr, KM_USER0);
     }
 //  kunmap (page);
   end_page_writeback (page);
@@ -592,7 +626,7 @@ pvshm_readpage (struct file *file, struct page *page)
             PageDirty (page) ? "Dirty" : "Not Dirty",
             PageLocked (page) ? "Locked" : "Unlocked");
 //  page_addr = kmap (page);
-  page_addr = kmap_atomic(page, KM_USER0);
+  page_addr = kmap_atomic (page, KM_USER0);
 //  page_addr = page_address (page);
   if (page_addr)
     {
@@ -617,7 +651,7 @@ pvshm_readpage (struct file *file, struct page *page)
  * resulting in j < PAGE_SIZE. We should probably clear the remainder of
  * the page here, or prior to this with page_zero...
  */
-      kunmap_atomic(page_addr, KM_USER0);
+      kunmap_atomic (page_addr, KM_USER0);
       SetPageUptodate (page);
     }
   if (PageLocked (page))
