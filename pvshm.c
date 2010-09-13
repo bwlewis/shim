@@ -573,13 +573,14 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
 
   inode = page->mapping->host;
   pvmd = (pvshm_target *) inode->i_private;
-//  page_addr = kmap (page);
   offset = page->index << PAGE_CACHE_SHIFT;
   j = 1;
   test_set_page_writeback (page);
   if (pvmd->file)
     {
-      page_addr = kmap_atomic (page, KM_USER0);
+// XXX We shouldn't use vfs_write inside an atomic section.
+//      page_addr = kmap_atomic (page, KM_USER0);
+      page_addr = kmap (page);
       if (verbose)
         printk ("About to write idx %d pageaddr %p\n", (int) page->index,
                 page_addr);
@@ -589,9 +590,9 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
         vfs_write (pvmd->file, (char __user *) page_addr, PAGE_SIZE, &offset);
 //      written = do_sync_write (target->file, p, PAGE_SIZE, &offset);
       set_fs (old_fs);
-      kunmap_atomic (page_addr, KM_USER0);
+      kunmap (page);
+//      kunmap_atomic (page_addr, KM_USER0);
     }
-//  kunmap (page);
   end_page_writeback (page);
   if (PageError (page))
     ClearPageError (page);
@@ -626,9 +627,8 @@ pvshm_readpage (struct file *file, struct page *page)
             PageUptodate (page) ? "Uptodate" : "Not Uptodate",
             PageDirty (page) ? "Dirty" : "Not Dirty",
             PageLocked (page) ? "Locked" : "Unlocked");
-//  page_addr = kmap (page);
-  page_addr = kmap_atomic (page, KM_USER0);
-//  page_addr = page_address (page);
+  page_addr = kmap (page);
+//  page_addr = kmap_atomic (page, KM_USER0);
   if (page_addr)
     {
       j = 0;
@@ -652,12 +652,12 @@ pvshm_readpage (struct file *file, struct page *page)
  * resulting in j < PAGE_SIZE. We should probably clear the remainder of
  * the page here, or prior to this with page_zero...
  */
-      kunmap_atomic (page_addr, KM_USER0);
+      kunmap (page);
+//      kunmap_atomic (page_addr, KM_USER0);
       SetPageUptodate (page);
     }
   if (PageLocked (page))
     unlock_page (page);
-//  kunmap (page);
   return 0;
 }
 
