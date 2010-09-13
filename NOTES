@@ -1,5 +1,5 @@
-- Planning to add pass-through write and truncate ops to the backing file,
-  mutatis mutandis the pass-through read operation.
+Basic pass-through read and write operations are now supported. AIO is
+not supported.
 
 THIS IS ONLY TESTED WITH Linux 2.6.31, and probably won't work with older
 kernels due to subtle changes in the VFS.  Indeed, pvshm crashes on x86_64
@@ -16,7 +16,6 @@ Error checking and some important features are woefully inadequate:
 In particular:
 
   - Memory mappings must not exceed backing file size.
-  - Backing file can't be deleted while linked.
   - Backing file must exist before mapping is created.
 
 Moral? Don't use this on a machine that you value. It will crash.

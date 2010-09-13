@@ -52,6 +52,7 @@
 #include <linux/writeback.h>
 #include <linux/syscalls.h>
 #include <linux/mpage.h>
+#include <linux/pagemap.h>
 
 #define BYTETOBINARY(byte)  \
   (byte & 0x80 ? 1 : 0), \
@@ -76,15 +77,14 @@ trylock_page (struct page *page)
 int verbose = 0;
 
 /* Superblock and file inode operations */
-// XXX should really be static const ...
-struct super_operations pvshm_ops;
+// XXX These should really be static const, but causes compatibility
+//     problems with older kernels.
 struct inode_operations pvshm_dir_inode_operations;
 struct inode_operations pvshm_file_inode_operations;
 static int pvshm_get_sb (struct file_system_type *fs_type,
                          int flags, const char *dev_name, void *data,
                          struct vfsmount *mnt);
 struct inode *pvshm_iget (struct super_block *sp, unsigned long ino);
-static int pvshm_setattr (struct dentry *dentry, struct iattr *attr);
 
 /* Address space operations */
 static int pvshm_writepage (struct page *page, struct writeback_control *wbc);
@@ -110,6 +110,11 @@ typedef struct
   struct file *file;
 } pvshm_target;
 
+
+const struct super_operations pvshm_sops = {
+  .statfs  = simple_statfs,
+};
+
 const struct address_space_operations pvshm_aops = {
   .readpage = pvshm_readpage,
   .writepage = pvshm_writepage,
@@ -126,8 +131,8 @@ const struct file_operations pvshm_file_operations = {
 };
 
 struct inode_operations pvshm_file_inode_operations = {
+//  .setattr = simple_setattr,
   .getattr = simple_getattr,
-  .setattr = pvshm_setattr,
 };
 
 // XXX Not presently used, but may be in the future to disable/adjust readahead.
@@ -148,6 +153,7 @@ pvshm_iget (struct super_block *sb, unsigned long ino)
   unlock_new_inode (inode);
   return inode;
 }
+
 
 /* File operations */
 
@@ -282,14 +288,15 @@ out:
 static int
 pvshm_sync_file (struct file *f, struct dentry *d, int k)
 {
-//  mm_segment_t old_fs;
   pvshm_target *pv_tgt;
-  int j = 0;
+  int j = -EBADF;
   struct inode *inode = f->f_mapping->host;
   pv_tgt = (pvshm_target *) inode->i_private;
+  if(!pv_tgt) goto out;
   if (verbose)
     printk ("pvshm_sync_file %s\n", pv_tgt->path);
   j = filemap_write_and_wait (f->f_mapping);
+out:
   return j;
 }
 
@@ -332,14 +339,6 @@ pvshm_get_inode (struct super_block *sb, int mode, dev_t dev)
     printk ("pvshm_get_inode capabilities=%d%d%d%d%d%d%d%d\n",
             BYTETOBINARY (inode->i_mapping->backing_dev_info->capabilities));
   return inode;
-}
-
-static int
-pvshm_setattr (struct dentry *dentry, struct iattr *attr)
-{
-  if (verbose)
-    printk ("pvshm_setattr d_name=%s\n", dentry->d_name.name);
-  return 0;
 }
 
 static int
@@ -433,6 +432,8 @@ pvshm_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
   inode = pvshm_iget (dir->i_sb, j);
 //      inode->i_mode= S_IFREG | S_IRWXUGO;
   inode->i_mode = stat.mode;
+  inode->i_uid = stat.uid;
+  inode->i_gid = stat.gid;
   inode->i_fop = &pvshm_file_operations;
   inode->i_mapping->a_ops = &pvshm_aops;
 //  inode->i_mapping->backing_dev_info = &pvshm_backing_dev_info;
@@ -453,7 +454,7 @@ pvshm_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
       pvmd->file = filp_open (symname, O_RDWR | O_LARGEFILE, 0644);
       if (!pvmd->file)
         {
-          error = -2;
+          error = -EBADF;
           if (verbose)
             printk ("pvshm_symlink symname=%s fget error\n", symname);
 // XXX add code to better handle errors here!
@@ -487,7 +488,7 @@ struct inode_operations pvshm_dir_inode_operations = {
   .mknod = pvshm_mknod,
   .rename = simple_rename,
   .lookup = simple_lookup,
-  .setattr = pvshm_setattr,
+//  .setattr = simple_setattr,
 };
 
 static struct file_system_type pvshm_fs_type = {
@@ -509,7 +510,7 @@ pvshm_fill_super (struct super_block *sb, void *data, int silent)
   sb->s_blocksize = PAGE_CACHE_SIZE;
   sb->s_blocksize_bits = PAGE_CACHE_SHIFT;
   sb->s_magic = PVSHM_MAGIC;
-  sb->s_op = &pvshm_ops;
+  sb->s_op = &pvshm_sops;
   sb->s_type = &pvshm_fs_type;
   sb->s_time_gran = 1;
   pvshm_root_inode = pvshm_get_inode (sb, S_IFDIR | 0755, 0);
