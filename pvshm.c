@@ -111,7 +111,7 @@ typedef struct
 } pvshm_target;
 
 
-const struct super_operations pvshm_sops = {
+struct super_operations pvshm_sops = {
   .statfs  = simple_statfs,
 };
 
