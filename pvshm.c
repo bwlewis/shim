@@ -90,7 +90,6 @@ struct inode *pvshm_iget (struct super_block *sp, unsigned long ino);
 static int pvshm_writepage (struct page *page, struct writeback_control *wbc);
 static int pvshm_readpage (struct file *file, struct page *page);
 static int pvshm_set_page_dirty_nobuffers (struct page *page);
-static int pvshm_releasepage (struct page *page, gfp_t gfp_flags);
 
 /* File operations */
 static int pvshm_file_mmap (struct file *, struct vm_area_struct *);
@@ -120,7 +119,6 @@ const struct address_space_operations pvshm_aops = {
   .writepage = pvshm_writepage,
   .writepages = generic_writepages,
   .set_page_dirty = pvshm_set_page_dirty_nobuffers,
-  .releasepage = pvshm_releasepage,
 };
 
 const struct file_operations pvshm_file_operations = {
@@ -548,16 +546,6 @@ pvshm_set_page_dirty_nobuffers (struct page *page)
             PageWriteback (page) ? "PWrbk Set" : "PWrbk Cleared",
             PageLocked (page) ? "Locked" : "Unlocked");
   return j;
-}
-
-static int
-pvshm_releasepage (struct page *page, gfp_t gfp_flags)
-{
-  if (verbose)
-    {
-      printk ("pvshm_releasepage private = %d\n", PagePrivate (page));
-    }
-  return 0;
 }
 
 static int
