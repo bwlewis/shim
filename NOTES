@@ -1,3 +1,10 @@
+***
+In the process of adding munin-style multiple writers to handle concurrent
+unsynchronized updates to non-overlapping parts of one page. This first
+draft will be a bit expensive and may make writing quite slow, so we will
+make it possible to disable this.
+***
+
 Basic pass-through read and write operations are now supported. AIO is
 not supported.
 
@@ -8,11 +15,9 @@ working on x86 and x86_64 2.6.31x kernels used in Ubuntu 9.10 and on x86_64
 2.6.32x kernels used in Ubuntu 10.04.
 
 The module opens the backing file for read/write as soon as a link
-is created. All local processes using this file and associated page
-cache access the backing file through this one file descriptor. Maybe
-this is a bad idea...
+is created.
 
-Error checking and some important features are woefully inadequate:
+Error checking and some important features are inadequate:
 In particular:
 
   - Memory mappings must not exceed backing file size.
