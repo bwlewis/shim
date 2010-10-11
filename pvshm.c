@@ -75,21 +75,33 @@ trylock_page (struct page *page)
 #endif
 
 int verbose = 0;
+// XXX Experimental global multiple writer flag. Setting this nonzero
+// forces pvshm_readpage to copy each page and set private. The copied
+// pages will then be released by pvshm_releasepage.
+int multiwrite = 0;
+struct diff_list{
+  struct list_head list;
+  int start;
+  int length;
+};
 
 /* Superblock and file inode operations */
-// XXX These should really be static const, but causes compatibility
-//     problems with older kernels.
+// XXX These should really be static const, but that declaration
+// causes compatibility problems with older kernels :(.
 struct inode_operations pvshm_dir_inode_operations;
 struct inode_operations pvshm_file_inode_operations;
 static int pvshm_get_sb (struct file_system_type *fs_type,
                          int flags, const char *dev_name, void *data,
                          struct vfsmount *mnt);
 struct inode *pvshm_iget (struct super_block *sp, unsigned long ino);
+int pvshm_setattr (struct dentry *dentry, struct iattr *iattr);
 
 /* Address space operations */
 static int pvshm_writepage (struct page *page, struct writeback_control *wbc);
 static int pvshm_readpage (struct file *file, struct page *page);
 static int pvshm_set_page_dirty_nobuffers (struct page *page);
+static int pvshm_releasepage (struct page *page, gfp_t gfp_flags);
+static void pvshm_invalidatepage (struct page *page, unsigned long offset);
 
 /* File operations */
 static int pvshm_file_mmap (struct file *, struct vm_area_struct *);
@@ -111,7 +123,7 @@ typedef struct
 
 
 struct super_operations pvshm_sops = {
-  .statfs  = simple_statfs,
+  .statfs = simple_statfs,
 };
 
 const struct address_space_operations pvshm_aops = {
@@ -119,6 +131,8 @@ const struct address_space_operations pvshm_aops = {
   .writepage = pvshm_writepage,
   .writepages = generic_writepages,
   .set_page_dirty = pvshm_set_page_dirty_nobuffers,
+  .releasepage = pvshm_releasepage,
+  .invalidatepage = pvshm_invalidatepage,
 };
 
 const struct file_operations pvshm_file_operations = {
@@ -129,7 +143,7 @@ const struct file_operations pvshm_file_operations = {
 };
 
 struct inode_operations pvshm_file_inode_operations = {
-//  .setattr = simple_setattr,
+  .setattr = pvshm_setattr,
   .getattr = simple_getattr,
 };
 
@@ -152,6 +166,12 @@ pvshm_iget (struct super_block *sb, unsigned long ino)
   return inode;
 }
 
+// XXX inode_setattr is deprecated. Will need to add a kernel version switch.
+int
+pvshm_setattr (struct dentry *dentry, struct iattr *iattr)
+{
+  return inode_setattr (dentry->d_inode, iattr);
+}
 
 /* File operations */
 
@@ -160,36 +180,27 @@ pvshm_read_again (struct file *file, struct address_space *mapping,
                   pgoff_t start, pgoff_t end)
 {
   struct pagevec pvec;
-  pgoff_t next = start;
   int i;
   pagevec_init (&pvec, 0);
-  while (next <= end && pagevec_lookup (&pvec, mapping, next, PAGEVEC_SIZE))
+  pagevec_lookup (&pvec, mapping, start, end);
+  for (i = 0; i < pagevec_count (&pvec); i++)
     {
-      for (i = 0; i < pagevec_count (&pvec); i++)
-        {
-          struct page *page = pvec.pages[i];
-          int lock_failed;
-          pgoff_t index;
-          lock_failed = trylock_page (page);
-          index = page->index;
-          if (index > next)
-            next = index;
-          next++;
-          ClearPageUptodate (page);
-          if (verbose)
-            printk ("read_again: page->index=%d %s %s\n",
-                    (int) page->index,
-                    PageUptodate (page) ? "Uptodate" :
-                    "Not Uptodate",
-                    PageLocked (page) ? "Locked" : "Unlocked");
-          if (PageLocked (page))
-            unlock_page (page);
-          pvshm_readpage (file, page);
-          if (next > end)
-            break;
-        }
-      pagevec_release (&pvec);
+      struct page *page = pvec.pages[i];
+      int lock_failed;
+      pgoff_t index;
+      lock_failed = trylock_page (page);
+      index = page->index;
+      ClearPageUptodate (page);
+      if (verbose)
+        printk ("read_again: page->index=%d %s %s\n",
+                (int) page->index,
+                PageUptodate (page) ? "Uptodate" :
+                "Not Uptodate", PageLocked (page) ? "Locked" : "Unlocked");
+      if (PageLocked (page))
+        unlock_page (page);
+      pvshm_readpage (file, page);
     }
+  pagevec_release (&pvec);
 }
 
 /* Pvshm uses the read function for two purposes:
@@ -246,7 +257,21 @@ out:
   return ret;
 }
 
-/* The pvshm_write function passes the write operation to the backing file. */
+/* pvshm_write
+ *
+ * The pvshm_write function passes usual write operations to the backing file.
+ * Similarly to pvshm_read, we define a special write operation designed to
+ * facilitate multiple writers into different bytes within a page.
+ * 
+ * Call pvshm_write with a null (0) buffer toggles "twin" mode. Twin mode
+ * forces pvshm_readpage to copy each page and mark them private.  The private
+ * field holds the address of the copy of the original page. When each such
+ * page is eventually committed to the backing file, the a bitwise difference
+ * between the cached page and the copied original page is written and the
+ * dirty and private flags are cleared.
+ *
+ */
+
 ssize_t
 pvshm_write (struct file * filp, const char __user * buf, size_t len,
              loff_t * skip)
@@ -266,6 +291,13 @@ pvshm_write (struct file * filp, const char __user * buf, size_t len,
       if (verbose)
         printk ("pvshm_write to backing file %s\n", pvmd->path);
     }
+  else
+    {
+// XXX experimental multiple writer code...
+      multiwrite = (multiwrite + 1) % 2;
+      if (verbose)
+        printk ("pvshm multiwrite = %d\n", multiwrite);
+    }
 out:
   return ret;
 }
@@ -275,7 +307,8 @@ pvshm_file_mmap (struct file *f, struct vm_area_struct *v)
 {
   int ret = -EBADF;
   pvshm_target *pvmd = (pvshm_target *) f->f_mapping->host->i_private;
-  if(!pvmd) goto out;
+  if (!pvmd)
+    goto out;
   if (verbose)
     printk ("pvshm_file_mmap %s\n", pvmd->path);
   ret = generic_file_mmap (f, v);
@@ -290,7 +323,8 @@ pvshm_sync_file (struct file *f, struct dentry *d, int k)
   int j = -EBADF;
   struct inode *inode = f->f_mapping->host;
   pv_tgt = (pvshm_target *) inode->i_private;
-  if(!pv_tgt) goto out;
+  if (!pv_tgt)
+    goto out;
   if (verbose)
     printk ("pvshm_sync_file %s\n", pv_tgt->path);
   j = filemap_write_and_wait (f->f_mapping);
@@ -486,7 +520,7 @@ struct inode_operations pvshm_dir_inode_operations = {
   .mknod = pvshm_mknod,
   .rename = simple_rename,
   .lookup = simple_lookup,
-//  .setattr = simple_setattr,
+//  .setattr = pvshm_setattr,
 };
 
 static struct file_system_type pvshm_fs_type = {
@@ -549,6 +583,33 @@ pvshm_set_page_dirty_nobuffers (struct page *page)
 }
 
 static int
+pvshm_releasepage (struct page *page, gfp_t gfp_flags)
+{
+  if (page_has_private (page))
+    {
+// XXX deallocate multiwrite twin copy of the page
+      kfree ((const void *) ((page)->private));
+      set_page_private (page, 0);
+      ClearPagePrivate (page);
+    }
+  if (verbose)
+    {
+      printk ("pvshm_releasepage private = %d\n", PagePrivate (page));
+    }
+  return 0;
+}
+
+static void
+pvshm_invalidatepage (struct page *page, unsigned long offset)
+{
+  if (verbose)
+    {
+      printk ("pvshm_invalidatepage private = %d\n", PagePrivate (page));
+    }
+  pvshm_releasepage (page, 0);
+}
+
+static int
 pvshm_writepage (struct page *page, struct writeback_control *wbc)
 {
   ssize_t j;
@@ -558,6 +619,7 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
   struct inode *inode;
   void *page_addr;
   pvshm_target *pvmd;
+  int m;
 
   inode = page->mapping->host;
   pvmd = (pvshm_target *) inode->i_private;
@@ -566,18 +628,73 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
   test_set_page_writeback (page);
   if (pvmd->file)
     {
-// XXX We shouldn't use vfs_write inside an atomic section.
-//      page_addr = kmap_atomic (page, KM_USER0);
+// NB. We unfortunately can't use vfs_write inside an atomic section,
+// precluding the more efficient: page_addr = kmap_atomic (page, KM_USER0);
       page_addr = kmap (page);
-      if (verbose)
-        printk ("About to write idx %d pageaddr %p\n", (int) page->index,
-                page_addr);
-      old_fs = get_fs ();
-      set_fs (get_ds ());
-      j =
-        vfs_write (pvmd->file, (char __user *) page_addr, PAGE_SIZE, &offset);
-//      written = do_sync_write (target->file, p, PAGE_SIZE, &offset);
-      set_fs (old_fs);
+// PagePrivate indicates that we are writing to this page respective of
+// other writers. In such cases we compare against a cached twin page and
+// write out only bytes that have changed. Otherwise the whole page is written.
+      m = 0;
+      if (page_has_private (page))
+        m = memcmp ((const void *) (page->private),
+                    (const void *) page_addr, PAGE_SIZE);
+      if (m != 0)
+        {
+          int k, n, h;
+          loff_t xoffset;
+          void *xpage_addr;
+          struct diff_list diff;
+          struct list_head *l, *q;
+          struct diff_list *dt = NULL;
+          char *A = (char *)(page->private);
+          char *B = (char *)page_addr;
+          INIT_LIST_HEAD(&diff.list);
+// Compute a diff and write back only altered bytes.
+          if(verbose) printk("writing difference page\n");
+          n = 0;
+          h = 0;
+          for(k = 0;k < PAGE_SIZE; ++k){
+            if(A[k] != B[k]){
+              if(h==0){
+                dt = (struct diff_list *)kmalloc(sizeof(struct diff_list),0);
+                dt->start = k;
+                h = 1;
+              }
+            }
+            else {
+              if(h==1) {
+                h = 0;
+                dt->length = k - dt->start;
+                list_add(&(dt->list), &(diff.list));
+              }
+            }
+          }
+          old_fs = get_fs ();
+          list_for_each_safe(l, q, &diff.list){
+            dt = list_entry(l, struct diff_list, list);
+if(verbose)
+printk("pvshm_writepage (diff) start=%d len=%d\n",dt->start, dt->length);
+            xoffset = offset + dt->start;
+            xpage_addr = (char __user *)page_addr;
+            xpage_addr = xpage_addr + dt->start;
+            set_fs (get_ds ());
+            vfs_write (pvmd->file, xpage_addr, dt->length,
+                       &xoffset);
+            set_fs (old_fs);
+            list_del(l);
+            kfree(dt);
+          }
+        }
+      else
+        {
+// Write back the whole page
+          old_fs = get_fs ();
+          set_fs (get_ds ());
+          j =
+            vfs_write (pvmd->file, (char __user *) page_addr, PAGE_SIZE,
+                       &offset);
+          set_fs (old_fs);
+        }
       kunmap (page);
 //      kunmap_atomic (page_addr, KM_USER0);
     }
@@ -632,6 +749,17 @@ pvshm_readpage (struct file *file, struct page *page)
             vfs_read (pvmd->file, (char __user *) page_addr, PAGE_SIZE,
                       &offset);
           set_fs (old_fs);
+        }
+      if (multiwrite && !page_has_private (page))
+        {
+// XXX multiwrite
+          void *twin;
+          pgoff_t index;
+          index = page->index;
+          twin = (void *) kmalloc (PAGE_SIZE, 0);
+          copy_page (twin, page_addr);
+          SetPagePrivate (page);
+          set_page_private (page, (unsigned long) twin);
         }
       if (verbose)
         printk ("readpage %d bytes at index %d complete\n", j,

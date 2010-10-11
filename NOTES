@@ -1,18 +1,14 @@
-***
-In the process of adding munin-style multiple writers to handle concurrent
-unsynchronized updates to non-overlapping parts of one page. This first
-draft will be a bit expensive and may make writing quite slow, so we will
-make it possible to disable this.
-***
+Multiple writer support with finer than page granularity is now supported.
 
 Basic pass-through read and write operations are now supported. AIO is
 not supported.
 
-THIS IS ONLY TESTED WITH Linux 2.6.31, and probably won't work with older
-kernels due to subtle changes in the VFS.  Indeed, pvshm crashes on x86_64
-2.6.28x kernels used in Ubuntu 9.04, don't use it on that OS.  It's tested
-working on x86 and x86_64 2.6.31x kernels used in Ubuntu 9.10 and on x86_64
-2.6.32x kernels used in Ubuntu 10.04.
+The pvshm module requires a recent (ca 2.6.31) vanilla Linux kernel. We include
+a hack to support older RHEL kernels used by Amazon EC2 (< 2.6.27), but use
+with Linux kernel versions prior to 2.6.31 at your own risk.  Pvshm is known to
+crash on x86_64 2.6.28x kernels used in Ubuntu 9.04, don't use it on that OS.
+It's tested working on x86 and x86_64 2.6.31x kernels used in Ubuntu 9.10 and
+on x86_64 2.6.32x kernels used in Ubuntu 10.04.
 
 The module opens the backing file for read/write as soon as a link
 is created.
@@ -21,7 +17,7 @@ Error checking and some important features are inadequate:
 In particular:
 
   - Memory mappings must not exceed backing file size.
-  - Backing file must exist before mapping is created.
+(this should be fixed)
 
 Moral? Don't use this on a machine that you value. It will crash.
 
@@ -34,6 +30,3 @@ backing file (reverse msync).
 
 Use the standard msync system call to force writeback of dirty pages
 in the page cache to the backing file.
-
-Everything is done at the page level. Finer granularity is not supported.
-Yet.
