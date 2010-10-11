@@ -79,7 +79,8 @@ int verbose = 0;
 // forces pvshm_readpage to copy each page and set private. The copied
 // pages will then be released by pvshm_releasepage.
 int multiwrite = 0;
-struct diff_list{
+struct diff_list
+{
   struct list_head list;
   int start;
   int length;
@@ -294,6 +295,7 @@ pvshm_write (struct file * filp, const char __user * buf, size_t len,
   else
     {
 // XXX experimental multiple writer code...
+// Toggle multiwrite status. This hack blows, improve this (chattr?).
       multiwrite = (multiwrite + 1) % 2;
       if (verbose)
         printk ("pvshm multiwrite = %d\n", multiwrite);
@@ -587,7 +589,7 @@ pvshm_releasepage (struct page *page, gfp_t gfp_flags)
 {
   if (page_has_private (page))
     {
-// XXX deallocate multiwrite twin copy of the page
+// deallocate multiwrite twin copy of the page
       kfree ((const void *) ((page)->private));
       set_page_private (page, 0);
       ClearPagePrivate (page);
@@ -629,7 +631,7 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
   if (pvmd->file)
     {
 // NB. We unfortunately can't use vfs_write inside an atomic section,
-// precluding the more efficient: page_addr = kmap_atomic (page, KM_USER0);
+// precluding the speedier page_addr = kmap_atomic (page, KM_USER0).
       page_addr = kmap (page);
 // PagePrivate indicates that we are writing to this page respective of
 // other writers. In such cases we compare against a cached twin page and
@@ -646,44 +648,57 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
           struct diff_list diff;
           struct list_head *l, *q;
           struct diff_list *dt = NULL;
-          char *A = (char *)(page->private);
-          char *B = (char *)page_addr;
-          INIT_LIST_HEAD(&diff.list);
+          char *A = (char *) (page->private);
+          char *B = (char *) page_addr;
+          INIT_LIST_HEAD (&diff.list);
 // Compute a diff and write back only altered bytes.
-          if(verbose) printk("writing difference page\n");
+          if (verbose)
+            printk ("writing difference page\n");
           n = 0;
           h = 0;
-          for(k = 0;k < PAGE_SIZE; ++k){
-            if(A[k] != B[k]){
-              if(h==0){
-                dt = (struct diff_list *)kmalloc(sizeof(struct diff_list),0);
-                dt->start = k;
-                h = 1;
-              }
+          for (k = 0; k < PAGE_SIZE; ++k)
+            {
+              if (A[k] != B[k])
+                {
+                  if (h == 0)
+                    {
+                      dt =
+                        (struct diff_list *)
+                        kmalloc (sizeof (struct diff_list), 0);
+                      dt->start = k;
+                      h = 1;
+                    }
+                }
+              else
+                {
+                  if (h == 1)
+                    {
+                      h = 0;
+                      dt->length = k - dt->start;
+                      list_add (&(dt->list), &(diff.list));
+                    }
+                }
             }
-            else {
-              if(h==1) {
-                h = 0;
-                dt->length = k - dt->start;
-                list_add(&(dt->list), &(diff.list));
-              }
-            }
-          }
           old_fs = get_fs ();
-          list_for_each_safe(l, q, &diff.list){
-// XXX allocate an iovec array and switch to vfs_writev here...
-            dt = list_entry(l, struct diff_list, list);
-if(verbose)
-printk("pvshm_writepage (diff) start=%d len=%d\n",dt->start, dt->length);
+// XXX This approach results in multiple filesystem write notifications.  It
+// sure would be nice to allocate an iovec array and switch to vfs_writev below
+// instead. However, we also need to write to different offsets in the file and
+// writev doesn't do that.
+// We could write a custom do_loop_readv_writev for this?
+          list_for_each_safe (l, q, &diff.list)
+          {
+            dt = list_entry (l, struct diff_list, list);
+            if (verbose)
+              printk ("pvshm_writepage (diff) start=%d len=%d\n", dt->start,
+                      dt->length);
             xoffset = offset + dt->start;
-            xpage_addr = (char __user *)page_addr;
+            xpage_addr = (char __user *) page_addr;
             xpage_addr = xpage_addr + dt->start;
             set_fs (get_ds ());
-            vfs_write (pvmd->file, xpage_addr, dt->length,
-                       &xoffset);
+            vfs_write (pvmd->file, xpage_addr, dt->length, &xoffset);
             set_fs (old_fs);
-            list_del(l);
-            kfree(dt);
+            list_del (l);
+            kfree (dt);
           }
         }
       else
@@ -691,9 +706,8 @@ printk("pvshm_writepage (diff) start=%d len=%d\n",dt->start, dt->length);
 // Write back the whole page
           old_fs = get_fs ();
           set_fs (get_ds ());
-          j =
-            vfs_write (pvmd->file, (char __user *) page_addr, PAGE_SIZE,
-                       &offset);
+          j = vfs_write (pvmd->file, (char __user *) page_addr,
+                         PAGE_SIZE, &offset);
           set_fs (old_fs);
         }
       kunmap (page);
