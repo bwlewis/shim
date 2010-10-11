@@ -671,6 +671,7 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
           }
           old_fs = get_fs ();
           list_for_each_safe(l, q, &diff.list){
+// XXX allocate an iovec array and switch to vfs_writev here...
             dt = list_entry(l, struct diff_list, list);
 if(verbose)
 printk("pvshm_writepage (diff) start=%d len=%d\n",dt->start, dt->length);
