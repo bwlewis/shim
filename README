@@ -87,5 +87,7 @@ insmod pvshm.ko
 mount -t pvshm none /mnt
 ln -s backing_file /mnt
 
+# (you can now memory map /mnt/backing_file)
+
 umount /mnt
 rmmod pvshm
