@@ -1,7 +1,17 @@
-Multiple writer support with finer than page granularity is now supported.
+Multiple writer support with finer than page granularity is now supported. We
+refer to this option as "multiwrite" mode.  Multiwrite mode is available on a
+per-file/per-kernel basis--that is, a file may be enabled for multiwrite mode
+on a per-computer basis across computers participating in a parallel file
+system. Multiwrite mode is toggled by issuing a write operation to a pvshm file
+with a NULL (0) buffer. This is something of a hack and may change in the near
+future. Once enabled, processes may write to non-overlapping bytes in a file
+without interference. Multiwrite mode is disabled by default. When enabled, it
+incurs a memory penalty because a difference must be computed between original
+and modified pagecache pages. Note that multiwrite mode is independent of cache
+consistency.
 
-Basic pass-through read and write operations are now supported. AIO is
-not supported.
+Basic pass-through read and write operations are now supported. AIO and iovec
+are not supported.
 
 The pvshm module requires a recent (ca 2.6.31) vanilla Linux kernel. We include
 a hack to support older RHEL kernels used by Amazon EC2 (< 2.6.27), but use
@@ -10,14 +20,12 @@ crash on x86_64 2.6.28x kernels used in Ubuntu 9.04, don't use it on that OS.
 It's tested working on x86 and x86_64 2.6.31x kernels used in Ubuntu 9.10 and
 on x86_64 2.6.32x kernels used in Ubuntu 10.04.
 
-The module opens the backing file for read/write as soon as a link
-is created.
+The module opens the backing file for read/write as soon as a link is created.
 
-Error checking and some important features are inadequate:
-In particular:
+Error checking and some important features are inadequate, but improving. In
+particular:
 
-  - Memory mappings must not exceed backing file size.
-(this should be fixed)
+  - Memory mappings must not exceed backing file size. (this should be fixed)
 
 Moral? Don't use this on a machine that you value. It will crash.
 

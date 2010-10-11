@@ -35,15 +35,11 @@ unconvention to make pvshm easy to use with existing tools. When a link
 is created, the backing file is opened for reading and writing by the module.
 
 Deleting a symbolic link closes the open file descriptor to the backing file
-and de-allocates data structures used by pvshm internally. It is essential
-to unlink the file before unmounting the pvshm file system.
-
-Most standard inode operations aside from the special symbolic linking and
-directory creation are not implemented or useful. File operations are partially
-supported (see below).
-
-For simplicity, most operations work on page-sized (4 kilobyte) chunks, 
-although backing files can be any size.
+and de-allocates data structures used by pvshm internally.  Although memory
+mapping is the main design objective, basic read and write file operations are
+supported for convenience.  Pvshm now supports multiple simultaneous writers
+with byte-level granularity, but a memory overhead is incurred. See the NOTES
+for more detailed information.
 
 
 Cache consistency
@@ -91,7 +87,5 @@ insmod pvshm.ko
 mount -t pvshm none /mnt
 ln -s backing_file /mnt
 
-# Be sure to delete the link when done:
-rm /mnt/backing_file
 umount /mnt
 rmmod pvshm
