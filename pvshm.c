@@ -67,6 +67,7 @@
 #define PVSHM_MAGIC	0x55566655
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27))
+#define page_has_private(page) PagePrivate(page)
 static inline int
 trylock_page (struct page *page)
 {
