@@ -53,6 +53,7 @@
 #include <linux/syscalls.h>
 #include <linux/mpage.h>
 #include <linux/pagemap.h>
+#include <linux/vmalloc.h>
 
 #define BYTETOBINARY(byte)  \
   (byte & 0x80 ? 1 : 0), \
@@ -760,73 +761,88 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
   return 0;
 }
 
-
+// XXX Support for read ahead is still experimental. This has already
+// gone through a few less than stellar iterations. Presently trying
+// vmap.
 static int
 pvshm_readpages (struct file *file, struct address_space *mapping,
                  struct list_head *pages, unsigned nr_pages)
 {
   unsigned page_idx;
   void *page_addr;
-  char __user *buf;
-  char __user *p;
+  void *p;
+  void *buf;
   mm_segment_t old_fs;
   loff_t offset;
   size_t res;
-  struct page *page = list_to_page (pages);
+  struct page *pg = list_to_page (pages);
   struct inode *inode = file->f_mapping->host;
   pvshm_target *pvmd = (pvshm_target *) inode->i_private;
-  unsigned long n = 0, m = 0;
-  if(verbose)
+  unsigned int n = 0, m = 0;
+  struct page **pg_array = kmalloc (sizeof (pg) * nr_pages, GFP_NOFS);
+  if (!pg_array)
+    return -ENOMEM;
+  if (verbose)
     printk ("pvshm_readpages %d\n", (int) nr_pages);
-  n = page->index;
+  n = pg->index;
   offset = n << PAGE_CACHE_SHIFT;
-  list_for_each_entry_reverse (page, pages, lru)
+  list_for_each_entry_reverse (pg, pages, lru)
   {
-    if (n == page->index)
+    if (n == pg->index)
       {
+        pg_array[m] = pg;
         ++m;
         ++n;
       }
     else
       break;
   }
-// m now contains the number of contiguous pages at
-// the start of the region.
-  buf = (char __user *)kmalloc(m * PAGE_SIZE, 0);
-// XXX Add ENONMEM check
+// m now contains the number of contiguous pages at the start of the list.
+
+//  buf = (void *)vmalloc_user(m * PAGE_SIZE);
+  buf = vmap (pg_array, m, VM_MAP, PAGE_KERNEL);
+  if (!buf)
+    {
+      kfree (pg_array);
+      return -ENOMEM;
+    }
   p = buf;
-  if(verbose)
+  if (verbose)
     printk ("pvshm_readpages contiguous = %ld\n", (long) m);
 // Read the contiguous block at once
   old_fs = get_fs ();
   set_fs (get_ds ());
   res = vfs_read (pvmd->file, (char __user *) buf, m * PAGE_SIZE, &offset);
   set_fs (old_fs);
-  if(verbose)
-    printk ("pvshm_readpages read = %ld\n", (long) res);
-// Copy buffer into pags and read any remaning pages after the block
+  if (verbose)
+    printk ("pvshm_readpages bytes read = %ld\n", (long) res);
+// Copy buffer into pages and read any remaning pages after the block one
+// by one.
   for (page_idx = 0; page_idx < nr_pages; page_idx++)
     {
-      page = list_to_page (pages);
-      list_del (&page->lru);
-      if (!add_to_page_cache_lru (page, mapping, page->index, GFP_KERNEL))
+      pg = list_to_page (pages);
+      list_del (&pg->lru);
+      if (!add_to_page_cache_lru (pg, mapping, pg->index, GFP_KERNEL))
         {
-          if (page_idx > m)
-            mapping->a_ops->readpage (file, page);
-          else {
-if(verbose) printk("Copying page addr %p from buffer addr %p\n",page_addr,p);
-            page_addr = kmap (page);
-            copy_page (page_addr, p);
-            p = p + PAGE_SIZE;
-            kunmap(page);
-          }
+          if (page_idx < m)
+            {
+              page_addr = kmap (pg);
+              if (verbose)
+                printk ("Copying to page addr %p from buffer addr %p\n",
+                        page_addr, p);
+              copy_page (page_addr, p);
+              p += PAGE_SIZE;
+              kunmap (pg);
+              SetPageUptodate (pg);
+              if (PageLocked (pg))
+                unlock_page (pg);
+            }
+          else
+            mapping->a_ops->readpage (file, pg);
         }
-      page_cache_release (page);
-      SetPageUptodate (page);
-      if (PageLocked (page))
-        unlock_page (page);
+      page_cache_release (pg);
     }
-  kfree(buf);
+  vunmap (buf);
   return 0;
 }
 
@@ -910,14 +926,14 @@ init_pvshm_fs (void)
   if (j)
     bdi_destroy (&pvshm_backing_dev_info);
   else
-    printk ("The pvshm module has been loaded.\n");
+    printk ("pvshm module loaded.\n");
   return j;
 }
 
 static void __exit
 exit_pvshm_fs (void)
 {
-  printk ("The pvshm module has been unloaded.\n");
+  printk ("pvshm module unloaded.\n");
   bdi_unregister (&pvshm_backing_dev_info);
   unregister_filesystem (&pvshm_fs_type);
 }
