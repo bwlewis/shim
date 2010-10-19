@@ -761,94 +761,72 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
 }
 
 
-// XXX HOMER borrowed from the ceph distributed file system
-// Build a vector of contiguous pages from a list of pages.
-static struct page **
-page_vector_from_list (struct list_head *page_list, unsigned *nr_pages)
-{
-  struct page **pages;
-  struct page *page;
-  int next_index, contig_pages = 0;
-
-  pages = kmalloc (sizeof (*pages) * *nr_pages, GFP_NOFS);
-  if (!pages)
-    return ERR_PTR (-ENOMEM);
-
-  BUG_ON (list_empty (page_list));
-  next_index = list_entry (page_list->prev, struct page, lru)->index;
-  list_for_each_entry_reverse (page, page_list, lru)
-  {
-    if (page->index == next_index)
-      {
-        pages[contig_pages] = page;
-        contig_pages++;
-        next_index++;
-      }
-    else
-      {
-        break;
-      }
-  }
-  *nr_pages = contig_pages;
-  return pages;
-}
-
 static int
 pvshm_readpages (struct file *file, struct address_space *mapping,
                  struct list_head *pages, unsigned nr_pages)
 {
   unsigned page_idx;
+  void *page_addr;
+  char __user *buf;
+  char __user *p;
   mm_segment_t old_fs;
   loff_t offset;
-  struct iovec __user *vec;
-  unsigned long n;
   size_t res;
   struct page *page = list_to_page (pages);
-  unsigned long j = 0;
+  struct inode *inode = file->f_mapping->host;
+  pvshm_target *pvmd = (pvshm_target *) inode->i_private;
+  unsigned long n = 0, m = 0;
   if(verbose)
     printk ("pvshm_readpages %d\n", (int) nr_pages);
-  vec =
-    (struct iovec __user *) kmalloc (sizeof (struct iovec __user) * nr_pages,
-                                     0);
   n = page->index;
   offset = n << PAGE_CACHE_SHIFT;
   list_for_each_entry_reverse (page, pages, lru)
   {
-    if (j == page->index)
+    if (n == page->index)
       {
-        vec[j].iov_base = (void __user *) page_address (page);
-        vec[j].iov_len = PAGE_SIZE;
-        ++j;
+        ++m;
         ++n;
       }
     else
       break;
   }
-// j now contains the number of contiguous pages at
+// m now contains the number of contiguous pages at
 // the start of the region.
+  buf = (char __user *)kmalloc(m * PAGE_SIZE, 0);
+// XXX Add ENONMEM check
+  p = buf;
   if(verbose)
-    printk ("pvshm_readpages contiguous = %d\n", (int) j);
-// read the contiguous block
+    printk ("pvshm_readpages contiguous = %ld\n", (long) m);
+// Read the contiguous block at once
   old_fs = get_fs ();
   set_fs (get_ds ());
-  res = vfs_readv (file, (const struct iovec __user *) vec, j, &offset);
+  res = vfs_read (pvmd->file, (char __user *) buf, m * PAGE_SIZE, &offset);
   set_fs (old_fs);
   if(verbose)
-    printk ("pvshm_readpages vfs_readv = %d\n", (int) res);
-  kfree (vec);
-// read any remaning pages after the block
+    printk ("pvshm_readpages read = %ld\n", (long) res);
+// Copy buffer into pags and read any remaning pages after the block
   for (page_idx = 0; page_idx < nr_pages; page_idx++)
     {
       page = list_to_page (pages);
       list_del (&page->lru);
       if (!add_to_page_cache_lru (page, mapping, page->index, GFP_KERNEL))
         {
-          if (page_idx > j)
+          if (page_idx > m)
             mapping->a_ops->readpage (file, page);
+          else {
+if(verbose) printk("Copying page addr %p from buffer addr %p\n",page_addr,p);
+            page_addr = kmap (page);
+            copy_page (page_addr, p);
+            p = p + PAGE_SIZE;
+            kunmap(page);
+          }
         }
       page_cache_release (page);
+      SetPageUptodate (page);
+      if (PageLocked (page))
+        unlock_page (page);
     }
-
+  kfree(buf);
   return 0;
 }
 
