@@ -65,9 +65,14 @@
   (byte & 0x01 ? 1 : 0)
 
 #define PVSHM_MAGIC	0x55566655
+#define list_to_page(head) (list_entry((head)->prev, struct page, lru))
+
+int verbose = 0;
+int read_ahead = 0;
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27))
 #define page_has_private(page) PagePrivate(page)
+#define BDI_CAP_SWAP_BACKED     0x00000100
 static inline int
 trylock_page (struct page *page)
 {
@@ -75,7 +80,29 @@ trylock_page (struct page *page)
 }
 #endif
 
-int verbose = 0;
+
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,34))
+static atomic_t pvshm_bdi_num = ATOMIC_INIT (0);
+
+int
+bdi_setup_and_register (struct backing_dev_info *bdi, char *name,
+                        unsigned int cap)
+{
+  int err;
+  bdi->capabilities = cap;
+  err = bdi_init (bdi);
+  bdi->ra_pages = (unsigned long) read_ahead;
+  if (err)
+    return err;
+  err =
+    bdi_register (bdi, NULL, "pvshm-%d", atomic_inc_return (&pvshm_bdi_num));
+  if (err)
+    return err;
+
+  return 0;
+}
+#endif
+
 // XXX Experimental global multiple writer flag. Setting this nonzero
 // forces pvshm_readpage to copy each page and set private. The copied
 // pages will then be released by pvshm_releasepage.
@@ -101,6 +128,8 @@ int pvshm_setattr (struct dentry *dentry, struct iattr *iattr);
 /* Address space operations */
 static int pvshm_writepage (struct page *page, struct writeback_control *wbc);
 static int pvshm_readpage (struct file *file, struct page *page);
+static int pvshm_readpages (struct file *file, struct address_space *mapping,
+                            struct list_head *page_list, unsigned nr_pages);
 static int pvshm_set_page_dirty_nobuffers (struct page *page);
 static int pvshm_releasepage (struct page *page, gfp_t gfp_flags);
 static void pvshm_invalidatepage (struct page *page, unsigned long offset);
@@ -130,6 +159,7 @@ struct super_operations pvshm_sops = {
 
 const struct address_space_operations pvshm_aops = {
   .readpage = pvshm_readpage,
+  .readpages = pvshm_readpages,
   .writepage = pvshm_writepage,
   .writepages = generic_writepages,
   .set_page_dirty = pvshm_set_page_dirty_nobuffers,
@@ -149,11 +179,7 @@ struct inode_operations pvshm_file_inode_operations = {
   .getattr = simple_getattr,
 };
 
-// XXX Not presently used, but may be in the future to disable/adjust readahead.
-//static struct backing_dev_info pvshm_backing_dev_info = {
-//  .ra_pages = 0,
-//  .capabilities = BDI_CAP_SWAP_BACKED;
-//};
+struct backing_dev_info pvshm_backing_dev_info;
 
 /* Inode operations */
 
@@ -298,8 +324,8 @@ pvshm_write (struct file * filp, const char __user * buf, size_t len,
 // XXX experimental multiple writer code...
 // Toggle multiwrite status. This hack blows, improve this (chattr?).
       multiwrite = (multiwrite + 1) % 2;
-      if (verbose)
-        printk ("pvshm multiwrite = %d\n", multiwrite);
+//      if (verbose)
+      printk ("pvshm multiwrite = %d\n", multiwrite);
     }
 out:
   return ret;
@@ -348,7 +374,7 @@ pvshm_get_inode (struct super_block *sb, int mode, dev_t dev)
 //      inode->i_gid = current->fsgid;
       inode->i_blocks = 0;
       inode->i_mapping->a_ops = &pvshm_aops;
-//      inode->i_mapping->backing_dev_info = &pvshm_backing_dev_info;
+      inode->i_mapping->backing_dev_info = &pvshm_backing_dev_info;
       inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
       switch (mode & S_IFMT)
         {
@@ -373,6 +399,9 @@ pvshm_get_inode (struct super_block *sb, int mode, dev_t dev)
   if (verbose)
     printk ("pvshm_get_inode capabilities=%d%d%d%d%d%d%d%d\n",
             BYTETOBINARY (inode->i_mapping->backing_dev_info->capabilities));
+  if (verbose)
+    printk ("pvshm_backing_dev_info.ra_pages = %d\n",
+            (int) inode->i_mapping->backing_dev_info->ra_pages);
   return inode;
 }
 
@@ -471,7 +500,7 @@ pvshm_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
   inode->i_gid = stat.gid;
   inode->i_fop = &pvshm_file_operations;
   inode->i_mapping->a_ops = &pvshm_aops;
-//  inode->i_mapping->backing_dev_info = &pvshm_backing_dev_info;
+  inode->i_mapping->backing_dev_info = &pvshm_backing_dev_info;
   if (verbose)
     printk ("pvshm_symlink d_name=%s, symname=%s\n",
             dentry->d_name.name, symname);
@@ -731,6 +760,99 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
   return 0;
 }
 
+
+// XXX HOMER borrowed from the ceph distributed file system
+// Build a vector of contiguous pages from a list of pages.
+static struct page **
+page_vector_from_list (struct list_head *page_list, unsigned *nr_pages)
+{
+  struct page **pages;
+  struct page *page;
+  int next_index, contig_pages = 0;
+
+  pages = kmalloc (sizeof (*pages) * *nr_pages, GFP_NOFS);
+  if (!pages)
+    return ERR_PTR (-ENOMEM);
+
+  BUG_ON (list_empty (page_list));
+  next_index = list_entry (page_list->prev, struct page, lru)->index;
+  list_for_each_entry_reverse (page, page_list, lru)
+  {
+    if (page->index == next_index)
+      {
+        pages[contig_pages] = page;
+        contig_pages++;
+        next_index++;
+      }
+    else
+      {
+        break;
+      }
+  }
+  *nr_pages = contig_pages;
+  return pages;
+}
+
+static int
+pvshm_readpages (struct file *file, struct address_space *mapping,
+                 struct list_head *pages, unsigned nr_pages)
+{
+  unsigned page_idx;
+  mm_segment_t old_fs;
+  loff_t offset;
+  struct iovec __user *vec;
+  unsigned long n;
+  size_t res;
+  struct page *page = list_to_page (pages);
+  unsigned long j = 0;
+  if(verbose)
+    printk ("pvshm_readpages %d\n", (int) nr_pages);
+  vec =
+    (struct iovec __user *) kmalloc (sizeof (struct iovec __user) * nr_pages,
+                                     0);
+  n = page->index;
+  offset = n << PAGE_CACHE_SHIFT;
+  list_for_each_entry_reverse (page, pages, lru)
+  {
+    if (j == page->index)
+      {
+        vec[j].iov_base = (void __user *) page_address (page);
+        vec[j].iov_len = PAGE_SIZE;
+        ++j;
+        ++n;
+      }
+    else
+      break;
+  }
+// j now contains the number of contiguous pages at
+// the start of the region.
+  if(verbose)
+    printk ("pvshm_readpages contiguous = %d\n", (int) j);
+// read the contiguous block
+  old_fs = get_fs ();
+  set_fs (get_ds ());
+  res = vfs_readv (file, (const struct iovec __user *) vec, j, &offset);
+  set_fs (old_fs);
+  if(verbose)
+    printk ("pvshm_readpages vfs_readv = %d\n", (int) res);
+  kfree (vec);
+// read any remaning pages after the block
+  for (page_idx = 0; page_idx < nr_pages; page_idx++)
+    {
+      page = list_to_page (pages);
+      list_del (&page->lru);
+      if (!add_to_page_cache_lru (page, mapping, page->index, GFP_KERNEL))
+        {
+          if (page_idx < j)
+            mapping->a_ops->readpage (file, page);
+        }
+      page_cache_release (page);
+    }
+
+  return 0;
+}
+
+
 static int
 pvshm_readpage (struct file *file, struct page *page)
 {
@@ -796,16 +918,29 @@ pvshm_readpage (struct file *file, struct page *page)
 static int __init
 init_pvshm_fs (void)
 {
-  if (verbose)
-    printk ("\n----------pvshm---danger---------------------------\n");
-  return register_filesystem (&pvshm_fs_type);
+  int j;
+  pvshm_backing_dev_info.ra_pages = (unsigned long) read_ahead;
+  pvshm_backing_dev_info.capabilities = BDI_CAP_SWAP_BACKED;
+  j = bdi_setup_and_register (&pvshm_backing_dev_info, "pvshm",
+                              BDI_CAP_SWAP_BACKED);
+  if (j)
+    {
+      printk ("pvshm ERROR initializing bdi\n");
+      return (j);
+    }
+  j = register_filesystem (&pvshm_fs_type);
+  if (j)
+    bdi_destroy (&pvshm_backing_dev_info);
+  else
+    printk ("The pvshm module has been loaded.\n");
+  return j;
 }
 
 static void __exit
 exit_pvshm_fs (void)
 {
-  if (verbose)
-    printk ("\n----------pvshm---relax---------------------------\n");
+  printk ("The pvshm module has been unloaded.\n");
+  bdi_unregister (&pvshm_backing_dev_info);
   unregister_filesystem (&pvshm_fs_type);
 }
 
@@ -814,6 +949,8 @@ module_exit (exit_pvshm_fs);
 
 module_param (verbose, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 MODULE_PARM_DESC (verbose, "1 -> verbose on");
+module_param (read_ahead, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+MODULE_PARM_DESC (read_ahead, "Nr. of read ahead pages, defaults to zero");
 
 MODULE_AUTHOR ("Bryan Wayne Lewis");
 MODULE_LICENSE ("GPL");
