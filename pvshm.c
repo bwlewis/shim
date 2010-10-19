@@ -843,7 +843,7 @@ pvshm_readpages (struct file *file, struct address_space *mapping,
       list_del (&page->lru);
       if (!add_to_page_cache_lru (page, mapping, page->index, GFP_KERNEL))
         {
-          if (page_idx < j)
+          if (page_idx > j)
             mapping->a_ops->readpage (file, page);
         }
       page_cache_release (page);
