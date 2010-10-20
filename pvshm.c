@@ -847,6 +847,7 @@ pvshm_readpages (struct file *file, struct address_space *mapping,
       page_cache_release (pg);
     }
   vunmap (buf);
+  kfree (pg_array);
   return 0;
 }
 
