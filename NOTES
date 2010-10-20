@@ -1,3 +1,8 @@
+---
+Now supporting read ahead via readpages, but this is experimental. There is
+a new kernel parameter 'read_ahead' that defaults to zero. Use it to set
+the number of read ahead pages.
+---
 Multiple writer support with finer than page granularity is now supported. We
 refer to this option as "multiwrite" mode.  Multiwrite mode is available on a
 per-file/per-kernel basis--that is, a file may be enabled for multiwrite mode
@@ -15,10 +20,10 @@ affected. Unless multiwrite mode is enabled right after linking and mapping the
 file, it's a good idea to first reverse msync any desired pages or flush the
 entire page cache.  In light of this, and since multiwrite affects all the
 processes accessing a file per kernel, their activity should be coordinated.
-
+---
 Basic pass-through read and write operations are now supported. AIO and iovec
 are not supported.
-
+---
 The pvshm module requires a recent (ca 2.6.31) vanilla Linux kernel. We include
 a hack to support older RHEL kernels used by Amazon EC2 (< 2.6.27), but use
 with Linux kernel versions prior to 2.6.31 at your own risk.  Pvshm is known to

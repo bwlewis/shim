@@ -82,7 +82,7 @@ trylock_page (struct page *page)
 #endif
 
 
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,34))
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,34) && LINUX_VERSION_CODE > KERNEL_VERSION(2,6,27))
 static atomic_t pvshm_bdi_num = ATOMIC_INIT (0);
 
 int
@@ -822,14 +822,16 @@ pvshm_readpages (struct file *file, struct address_space *mapping,
     {
       pg = list_to_page (pages);
       list_del (&pg->lru);
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(2,6,27))
       if (!add_to_page_cache_lru (pg, mapping, pg->index, GFP_KERNEL))
         {
+#endif
           if (page_idx < m)
             {
               page_addr = kmap (pg);
               if (verbose)
-                printk ("Copying to page addr %p from buffer addr %p\n",
-                        page_addr, p);
+                printk ("Copying to page addr %p index %ld from buffer addr %p\n",
+                        page_addr, pg->index, p);
               copy_page (page_addr, p);
               p += PAGE_SIZE;
               kunmap (pg);
@@ -839,7 +841,9 @@ pvshm_readpages (struct file *file, struct address_space *mapping,
             }
           else
             mapping->a_ops->readpage (file, pg);
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(2,6,27))
         }
+#endif
       page_cache_release (pg);
     }
   vunmap (buf);
@@ -915,6 +919,7 @@ init_pvshm_fs (void)
   int j;
   pvshm_backing_dev_info.ra_pages = (unsigned long) read_ahead;
   pvshm_backing_dev_info.capabilities = BDI_CAP_SWAP_BACKED;
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(2,6,27))
   j = bdi_setup_and_register (&pvshm_backing_dev_info, "pvshm",
                               BDI_CAP_SWAP_BACKED);
   if (j)
@@ -922,11 +927,14 @@ init_pvshm_fs (void)
       printk ("pvshm ERROR initializing bdi\n");
       return (j);
     }
+#endif
   j = register_filesystem (&pvshm_fs_type);
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(2,6,27))
   if (j)
     bdi_destroy (&pvshm_backing_dev_info);
   else
-    printk ("pvshm module loaded.\n");
+#endif
+    printk ("pvshm module loaded, ra_pages = %d.\n",(int)pvshm_backing_dev_info.ra_pages );
   return j;
 }
 
@@ -934,7 +942,9 @@ static void __exit
 exit_pvshm_fs (void)
 {
   printk ("pvshm module unloaded.\n");
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(2,6,27))
   bdi_unregister (&pvshm_backing_dev_info);
+#endif
   unregister_filesystem (&pvshm_fs_type);
 }
 
