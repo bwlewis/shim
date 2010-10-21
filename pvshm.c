@@ -21,10 +21,6 @@
  * implement traditional read nor write operations. See the design document
  * for more information.
  *
- * Yes, I know one is not to access userspace file systems from the kernel.
- * I plan to eventually separate userspace file functions out into a daemon,
- * similarly to fuse.
- *
  * OK, I know what you're about to ask: why not just use fuse? The fuse
  * (experimental) writable mmap code is not easy to follow, and is focused
  * on a very general-purpose, cache-consistent model, and I'm not sure if it
