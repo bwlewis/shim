@@ -15,11 +15,11 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  *
- * Pvshm is an experimental shadow file system that intercepts memory-mapped 
+ * Pvshm is an experimental overlay file system that intercepts memory-mapped 
  * operations and replaces them with file read/write calls to another file 
- * system. The pvshm file system only supports mmap operations and does not
- * implement traditional read nor write operations. See the design document
- * for more information.
+ * system. Pvshm is designed to provide basic mmap support over file systems
+ * that don't natively support mmap. Basic read and write operations are
+ * simply passed-through to the backing file system.
  *
  * OK, I know what you're about to ask: why not just use fuse? The fuse
  * (experimental) writable mmap code is not easy to follow, and is focused
@@ -65,7 +65,7 @@
 #define list_to_page(head) (list_entry((head)->prev, struct page, lru))
 
 int verbose = 0;
-int read_ahead = 0;
+int read_ahead = 256;
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27))
 #define page_has_private(page) PagePrivate(page)
@@ -75,8 +75,28 @@ trylock_page (struct page *page)
 {
   return (likely (!test_and_set_bit (PG_locked, &page->flags)));
 }
-#endif
+/* Unfortunately, add_to_page_cache_lru is not exported by 2.6.26.x and
+ * earlier kernels.
+ */
+static DEFINE_PER_CPU(struct pagevec, lru_add_pvecs) = { 0, };
+void lru_cache_add(struct page *page)
+{
+        struct pagevec *pvec = &get_cpu_var(lru_add_pvecs);
 
+        page_cache_get(page);
+        if (!pagevec_add(pvec, page))
+                __pagevec_lru_add(pvec);
+        put_cpu_var(lru_add_pvecs);
+}
+int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
+                                pgoff_t offset, gfp_t gfp_mask)
+{
+        int ret = add_to_page_cache(page, mapping, offset, gfp_mask);
+        if (ret == 0)
+                lru_cache_add(page);
+        return ret;
+}
+#endif
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,34) && LINUX_VERSION_CODE > KERNEL_VERSION(2,6,27))
 static atomic_t pvshm_bdi_num = ATOMIC_INIT (0);
@@ -100,9 +120,10 @@ bdi_setup_and_register (struct backing_dev_info *bdi, char *name,
 }
 #endif
 
-// XXX Experimental global multiple writer flag. Setting this nonzero
-// forces pvshm_readpage to copy each page and set private. The copied
-// pages will then be released by pvshm_releasepage.
+/* XXX Experimental global multiple writer flag. Setting this nonzero
+ * forces pvshm_readpage to copy each page and set private. The copied
+ * pages will then be released by pvshm_releasepage.
+ */
 int multiwrite = 0;
 struct diff_list
 {
@@ -112,8 +133,9 @@ struct diff_list
 };
 
 /* Superblock and file inode operations */
-// XXX These should really be static const, but that declaration
-// causes compatibility problems with older kernels :(.
+/* XXX These should really be static const, but that declaration
+ * causes compatibility problems with older kernels :(.
+ */
 struct inode_operations pvshm_dir_inode_operations;
 struct inode_operations pvshm_file_inode_operations;
 static int pvshm_get_sb (struct file_system_type *fs_type,
@@ -179,7 +201,6 @@ struct inode_operations pvshm_file_inode_operations = {
 struct backing_dev_info pvshm_backing_dev_info;
 
 /* Inode operations */
-
 struct inode *
 pvshm_iget (struct super_block *sb, unsigned long ino)
 {
@@ -191,7 +212,7 @@ pvshm_iget (struct super_block *sb, unsigned long ino)
   return inode;
 }
 
-// XXX inode_setattr is deprecated. Will need to add a kernel version switch.
+/* XXX inode_setattr is deprecated. Will need to add a kernel version switch.*/
 int
 pvshm_setattr (struct dentry *dentry, struct iattr *iattr)
 {
@@ -259,16 +280,18 @@ pvshm_read (struct file *filp, char __user * buf, size_t len, loff_t * skip)
   if (verbose)
     printk ("nrpages=%d \n", (int) mapping->nrpages);
   mutex_lock (&filp->f_mapping->host->i_mutex);
-// I tried simply the following first, but it's not enough. Note that we are
-// generally not free to eject the page either as it may be in use by somebody,
-// hence the pvshm_read_again function.
-//      invalidate_mapping_pages (mapping, pstart, pend); 
+/* I tried simply the following first, but it's not enough. Note that we are
+ * generally not free to eject the page either as it may be in use by somebody,
+ * hence the pvshm_read_again function.
+ *      invalidate_mapping_pages (mapping, pstart, pend); 
+ */
   pvshm_read_again (filp, mapping, pstart, pend);
   mutex_unlock (&filp->f_mapping->host->i_mutex);
   if (verbose)
     printk ("pvshm_read cache update OK\n");
-// A non-zero buffer address triggers a standard read operation on
-// the backing file:
+/* A non-zero buffer address triggers a standard read operation on
+ * the backing file:
+ */
   if (buf)
     {
       old_fs = get_fs ();
@@ -318,11 +341,12 @@ pvshm_write (struct file * filp, const char __user * buf, size_t len,
     }
   else
     {
-// XXX experimental multiple writer code...
-// Toggle multiwrite status. This hack blows, improve this (chattr?).
+/* XXX experimental multiple writer code...
+ * Toggle multiwrite status. This hack blows, improve this (chattr?).
+ */
       multiwrite = (multiwrite + 1) % 2;
-//      if (verbose)
-      printk ("pvshm multiwrite = %d\n", multiwrite);
+      if (verbose)
+        printk ("pvshm multiwrite = %d for %s\n", multiwrite, pvmd->path);
     }
 out:
   return ret;
@@ -367,8 +391,10 @@ pvshm_get_inode (struct super_block *sb, int mode, dev_t dev)
   if (inode)
     {
       inode->i_mode = mode;
-//      inode->i_uid = current->fsuid;
-//      inode->i_gid = current->fsgid;
+/* XXX why not this?
+ *      inode->i_uid = current->fsuid;
+ *      inode->i_gid = current->fsgid;
+ */
       inode->i_blocks = 0;
       inode->i_mapping->a_ops = &pvshm_aops;
       inode->i_mapping->backing_dev_info = &pvshm_backing_dev_info;
@@ -491,7 +517,6 @@ pvshm_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
   pvmd->max_size = stat.size;
 
   inode = pvshm_iget (dir->i_sb, j);
-//      inode->i_mode= S_IFREG | S_IRWXUGO;
   inode->i_mode = stat.mode;
   inode->i_uid = stat.uid;
   inode->i_gid = stat.gid;
@@ -504,21 +529,20 @@ pvshm_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
   if (inode)
     {
       int l = strlen (symname) + 1;
-// We don't do this: page_symlink(inode, symname, l);
-// The standard approach of putting the symlink name in page 0 does not 
-// work in this case since we use all pages in the mapping.  We allocate 
-// space for the file name and store it in the inode private field.
+/* We don't do this: page_symlink(inode, symname, l);
+ * The standard approach of putting the symlink name in page 0 does not 
+ * work in this case since we use all pages in the mapping.  We allocate 
+ * space for the file name and store it in the inode private field.
+ */
       error = 0;
       pvmd->path = (char *) kmalloc (l, 0);
       memcpy (pvmd->path, symname, l);
-// Open a file stream now
       pvmd->file = filp_open (symname, O_RDWR | O_LARGEFILE, 0644);
       if (!pvmd->file)
         {
           error = -EBADF;
           if (verbose)
             printk ("pvshm_symlink symname=%s fget error\n", symname);
-// XXX add code to better handle errors here!
         }
 
       inode->i_private = pvmd;
@@ -616,7 +640,7 @@ pvshm_releasepage (struct page *page, gfp_t gfp_flags)
 {
   if (page_has_private (page))
     {
-// deallocate multiwrite twin copy of the page
+/* deallocate multiwrite twin copy of the page */
       kfree ((const void *) ((page)->private));
       set_page_private (page, 0);
       ClearPagePrivate (page);
@@ -642,7 +666,6 @@ static int
 pvshm_writepage (struct page *page, struct writeback_control *wbc)
 {
   ssize_t j;
-//  struct pagevec pv;
   loff_t offset;
   mm_segment_t old_fs;
   struct inode *inode;
@@ -657,12 +680,14 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
   test_set_page_writeback (page);
   if (pvmd->file)
     {
-// NB. We unfortunately can't use vfs_write inside an atomic section,
-// precluding the speedier page_addr = kmap_atomic (page, KM_USER0).
+/* NB. We unfortunately can't use vfs_write inside an atomic section,
+ * precluding the speedier page_addr = kmap_atomic (page, KM_USER0).
+ */
       page_addr = kmap (page);
-// PagePrivate indicates that we are writing to this page respective of
-// other writers. In such cases we compare against a cached twin page and
-// write out only bytes that have changed. Otherwise the whole page is written.
+/* PagePrivate indicates that we are writing to this page respective of
+ * other writers. In such cases we compare against a cached twin page and
+ * write out only bytes that have changed. Otherwise the whole page is written.
+ */
       m = 0;
       if (page_has_private (page))
         m = memcmp ((const void *) (page->private),
@@ -678,7 +703,7 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
           char *A = (char *) (page->private);
           char *B = (char *) page_addr;
           INIT_LIST_HEAD (&diff.list);
-// Compute a diff and write back only altered bytes.
+/* Compute a diff and write back only altered bytes. */
           if (verbose)
             printk ("writing difference page\n");
           n = 0;
@@ -707,11 +732,12 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
                 }
             }
           old_fs = get_fs ();
-// XXX This approach results in multiple filesystem write notifications.  It
-// sure would be nice to allocate an iovec array and switch to vfs_writev below
-// instead. However, we also need to write to different offsets in the file and
-// writev doesn't do that.
-// We could write a custom do_loop_readv_writev for this?
+/* XXX This approach results in multiple filesystem write notifications.  It
+ * sure would be nice to allocate an iovec array and switch to vfs_writev below
+ * instead. However, we also need to write to different offsets in the file and
+ * writev doesn't do that.
+ * We could write a custom do_loop_readv_writev for this?
+ */
           list_for_each_safe (l, q, &diff.list)
           {
             dt = list_entry (l, struct diff_list, list);
@@ -730,7 +756,7 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
         }
       else
         {
-// Write back the whole page
+/* Write back the whole page */
           old_fs = get_fs ();
           set_fs (get_ds ());
           j = vfs_write (pvmd->file, (char __user *) page_addr,
@@ -738,7 +764,6 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
           set_fs (old_fs);
         }
       kunmap (page);
-//      kunmap_atomic (page_addr, KM_USER0);
     }
   end_page_writeback (page);
   if (PageError (page))
@@ -757,9 +782,7 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
   return 0;
 }
 
-// XXX Support for read ahead is still experimental. This has already
-// gone through a few less than stellar iterations. Presently trying
-// vmap.
+/* read ahead. */
 static int
 pvshm_readpages (struct file *file, struct address_space *mapping,
                  struct list_head *pages, unsigned nr_pages)
@@ -793,9 +816,8 @@ pvshm_readpages (struct file *file, struct address_space *mapping,
     else
       break;
   }
-// m now contains the number of contiguous pages at the start of the list.
+/* m now contains the number of contiguous pages at the start of the list. */
 
-//  buf = (void *)vmalloc_user(m * PAGE_SIZE);
   buf = vmap (pg_array, m, VM_MAP, PAGE_KERNEL);
   if (!buf)
     {
@@ -805,23 +827,22 @@ pvshm_readpages (struct file *file, struct address_space *mapping,
   p = buf;
   if (verbose)
     printk ("pvshm_readpages contiguous = %ld\n", (long) m);
-// Read the contiguous block at once
+/* Read the contiguous block at once */
   old_fs = get_fs ();
   set_fs (get_ds ());
   res = vfs_read (pvmd->file, (char __user *) buf, m * PAGE_SIZE, &offset);
   set_fs (old_fs);
   if (verbose)
     printk ("pvshm_readpages bytes read = %ld\n", (long) res);
-// Copy buffer into pages and read any remaning pages after the block one
-// by one.
+/* Copy buffer into pages and read any remaning pages after the block one
+ * by one.
+ */
   for (page_idx = 0; page_idx < nr_pages; page_idx++)
     {
       pg = list_to_page (pages);
       list_del (&pg->lru);
-#if (LINUX_VERSION_CODE > KERNEL_VERSION(2,6,27))
       if (!add_to_page_cache_lru (pg, mapping, pg->index, GFP_KERNEL))
         {
-#endif
           if (page_idx < m)
             {
               page_addr = kmap (pg);
@@ -837,16 +858,13 @@ pvshm_readpages (struct file *file, struct address_space *mapping,
             }
           else
             mapping->a_ops->readpage (file, pg);
-#if (LINUX_VERSION_CODE > KERNEL_VERSION(2,6,27))
         }
-#endif
       page_cache_release (pg);
     }
   vunmap (buf);
   kfree (pg_array);
   return 0;
 }
-
 
 static int
 pvshm_readpage (struct file *file, struct page *page)
@@ -866,7 +884,6 @@ pvshm_readpage (struct file *file, struct page *page)
             PageDirty (page) ? "Dirty" : "Not Dirty",
             PageLocked (page) ? "Locked" : "Unlocked");
   page_addr = kmap (page);
-//  page_addr = kmap_atomic (page, KM_USER0);
   if (page_addr)
     {
       j = 0;
@@ -885,7 +902,7 @@ pvshm_readpage (struct file *file, struct page *page)
         }
       if (multiwrite && !page_has_private (page))
         {
-// XXX multiwrite
+/* XXX multiwrite */
           void *twin;
           pgoff_t index;
           index = page->index;
@@ -902,7 +919,6 @@ pvshm_readpage (struct file *file, struct page *page)
  * the page here, or prior to this with page_zero...
  */
       kunmap (page);
-//      kunmap_atomic (page_addr, KM_USER0);
       SetPageUptodate (page);
     }
   if (PageLocked (page))
@@ -949,9 +965,9 @@ module_init (init_pvshm_fs);
 module_exit (exit_pvshm_fs);
 
 module_param (verbose, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-MODULE_PARM_DESC (verbose, "1 -> verbose on");
+MODULE_PARM_DESC (verbose, " 1 -> verbose on (default=0)");
 module_param (read_ahead, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-MODULE_PARM_DESC (read_ahead, "Nr. of read ahead pages, defaults to zero");
+MODULE_PARM_DESC (read_ahead, " Nr. of pages to read ahead, (default=256)");
 
 MODULE_AUTHOR ("Bryan Wayne Lewis");
 MODULE_LICENSE ("GPL");
