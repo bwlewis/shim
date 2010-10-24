@@ -65,7 +65,7 @@
 #define list_to_page(head) (list_entry((head)->prev, struct page, lru))
 
 int verbose = 0;
-int read_ahead = 256;
+int read_ahead = 1024;
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27))
 #define page_has_private(page) PagePrivate(page)
@@ -75,26 +75,33 @@ trylock_page (struct page *page)
 {
   return (likely (!test_and_set_bit (PG_locked, &page->flags)));
 }
+
 /* Unfortunately, add_to_page_cache_lru is not exported by 2.6.26.x and
  * earlier kernels.
  */
-static DEFINE_PER_CPU(struct pagevec, lru_add_pvecs) = { 0, };
-void lru_cache_add(struct page *page)
+static DEFINE_PER_CPU (struct pagevec, lru_add_pvecs) =
 {
-        struct pagevec *pvec = &get_cpu_var(lru_add_pvecs);
+0,};
 
-        page_cache_get(page);
-        if (!pagevec_add(pvec, page))
-                __pagevec_lru_add(pvec);
-        put_cpu_var(lru_add_pvecs);
-}
-int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
-                                pgoff_t offset, gfp_t gfp_mask)
+void
+lru_cache_add (struct page *page)
 {
-        int ret = add_to_page_cache(page, mapping, offset, gfp_mask);
-        if (ret == 0)
-                lru_cache_add(page);
-        return ret;
+  struct pagevec *pvec = &get_cpu_var (lru_add_pvecs);
+
+  page_cache_get (page);
+  if (!pagevec_add (pvec, page))
+    __pagevec_lru_add (pvec);
+  put_cpu_var (lru_add_pvecs);
+}
+
+int
+add_to_page_cache_lru (struct page *page, struct address_space *mapping,
+                       pgoff_t offset, gfp_t gfp_mask)
+{
+  int ret = add_to_page_cache (page, mapping, offset, gfp_mask);
+  if (ret == 0)
+    lru_cache_add (page);
+  return ret;
 }
 #endif
 
@@ -180,6 +187,7 @@ const struct address_space_operations pvshm_aops = {
   .readpage = pvshm_readpage,
   .readpages = pvshm_readpages,
   .writepage = pvshm_writepage,
+// XXX TO DO: Add a block writepages function similar to pvshm_readpages
   .writepages = generic_writepages,
   .set_page_dirty = pvshm_set_page_dirty_nobuffers,
   .releasepage = pvshm_releasepage,
@@ -847,8 +855,9 @@ pvshm_readpages (struct file *file, struct address_space *mapping,
             {
               page_addr = kmap (pg);
               if (verbose)
-                printk ("Copying to page addr %p index %ld from buffer addr %p\n",
-                        page_addr, pg->index, p);
+                printk
+                  ("Copying to page addr %p index %ld from buffer addr %p\n",
+                   page_addr, pg->index, p);
               copy_page (page_addr, p);
               p += PAGE_SIZE;
               kunmap (pg);
@@ -947,7 +956,8 @@ init_pvshm_fs (void)
     bdi_destroy (&pvshm_backing_dev_info);
   else
 #endif
-    printk ("pvshm module loaded, ra_pages = %d.\n",(int)pvshm_backing_dev_info.ra_pages );
+    printk ("pvshm module loaded, ra_pages = %d.\n",
+            (int) pvshm_backing_dev_info.ra_pages);
   return j;
 }
 
