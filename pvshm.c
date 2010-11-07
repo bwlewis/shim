@@ -65,7 +65,7 @@
 #define list_to_page(head) (list_entry((head)->prev, struct page, lru))
 
 int verbose = 0;
-int read_ahead = 1024;
+unsigned int read_ahead = 1024;
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27))
 #define page_has_private(page) PagePrivate(page)
@@ -127,11 +127,7 @@ bdi_setup_and_register (struct backing_dev_info *bdi, char *name,
 }
 #endif
 
-/* XXX Experimental global multiple writer flag. Setting this nonzero
- * forces pvshm_readpage to copy each page and set private. The copied
- * pages will then be released by pvshm_releasepage.
- */
-int multiwrite = 0;
+/* Used by multiwrite */
 struct diff_list
 {
   struct list_head list;
@@ -156,6 +152,8 @@ static int pvshm_writepage (struct page *page, struct writeback_control *wbc);
 static int pvshm_readpage (struct file *file, struct page *page);
 static int pvshm_readpages (struct file *file, struct address_space *mapping,
                             struct list_head *page_list, unsigned nr_pages);
+static int pvshm_writepages(struct address_space *mapping,
+                            struct writeback_control *wbc);
 static int pvshm_set_page_dirty_nobuffers (struct page *page);
 static int pvshm_releasepage (struct page *page, gfp_t gfp_flags);
 static void pvshm_invalidatepage (struct page *page, unsigned long offset);
@@ -176,6 +174,7 @@ typedef struct
   char *path;
   loff_t max_size;
   struct file *file;
+  int multiwrite;
 } pvshm_target;
 
 
@@ -187,8 +186,7 @@ const struct address_space_operations pvshm_aops = {
   .readpage = pvshm_readpage,
   .readpages = pvshm_readpages,
   .writepage = pvshm_writepage,
-// XXX TO DO: Add a block writepages function similar to pvshm_readpages
-  .writepages = generic_writepages,
+  .writepages = pvshm_writepages,
   .set_page_dirty = pvshm_set_page_dirty_nobuffers,
   .releasepage = pvshm_releasepage,
   .invalidatepage = pvshm_invalidatepage,
@@ -350,11 +348,12 @@ pvshm_write (struct file * filp, const char __user * buf, size_t len,
   else
     {
 /* XXX experimental multiple writer code...
- * Toggle multiwrite status. This hack blows, improve this (chattr?).
+ * Toggle multiwrite status. This hack kind of sucks, maybe
+ * improve this with file attributes?
  */
-      multiwrite = (multiwrite + 1) % 2;
+      pvmd->multiwrite = (pvmd->multiwrite + 1) % 2;
       if (verbose)
-        printk ("pvshm multiwrite = %d for %s\n", multiwrite, pvmd->path);
+        printk ("pvshm multiwrite = %d for %s\n", pvmd->multiwrite, pvmd->path);
     }
 out:
   return ret;
@@ -523,6 +522,7 @@ pvshm_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
       goto end;
     }
   pvmd->max_size = stat.size;
+  pvmd->multiwrite = 0;
 
   inode = pvshm_iget (dir->i_sb, j);
   inode->i_mode = stat.mode;
@@ -740,12 +740,6 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
                 }
             }
           old_fs = get_fs ();
-/* XXX This approach results in multiple filesystem write notifications.  It
- * sure would be nice to allocate an iovec array and switch to vfs_writev below
- * instead. However, we also need to write to different offsets in the file and
- * writev doesn't do that.
- * We could write a custom do_loop_readv_writev for this?
- */
           list_for_each_safe (l, q, &diff.list)
           {
             dt = list_entry (l, struct diff_list, list);
@@ -788,6 +782,51 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
             PageReferenced (page) ? "Referenced" : "Not Referenced",
             PageLocked (page) ? "Locked" : "Unlocked", page_count (page));
   return 0;
+}
+
+
+static int
+pvshm_writepages(struct address_space *mapping, struct writeback_control *wbc)
+{
+  pgoff_t index;
+  pgoff_t start;
+  pgoff_t end = -1;
+  int n, private, j;
+  struct page **p;
+  struct inode *inode= mapping->host;
+  pvshm_target *pvmd = (pvshm_target *) inode->i_private;
+// XXX multiwrite block writes not yet implemented
+  if(pvmd->multiwrite) goto out;
+  p = kmalloc (sizeof (struct page *) * read_ahead, GFP_NOFS);
+  if (wbc->range_cyclic) 
+    index = mapping->writeback_index;
+  else {
+    index = wbc->range_start >> PAGE_CACHE_SHIFT;
+    end = wbc->range_end >> PAGE_CACHE_SHIFT;
+  }
+  while(index <= end) {
+    n = find_get_pages_tag(mapping, &index, PAGECACHE_TAG_DIRTY, read_ahead, p);
+    if(n == 0) break;
+    if(verbose)  printk("pvshm_writepages ndirty=%d index=%ld\n",n,index);
+// Search the array of dirty pages for contiguous blocks
+    if(n>1) {
+      start = p[0]->index;
+      private = 0;
+      for(j=0;j<(n-1);++j) {
+        private = private && page_has_private(p[j]);
+        if(p[j+1]->index != p[j]->index + 1) {
+printk("BLOCK private=%d start=%ld end=%ld\n",private, start, p[j]->index);
+          start = p[j+1]->index;
+          private = 0;
+        }
+      }
+    }
+printk("BLOCK private=%d start=%ld end=%ld\n",private, start, p[j]->index);
+  }
+  kfree(p);
+out:
+// Write out any remaining pages
+  return generic_writepages(mapping, wbc);
 }
 
 /* read ahead. */
@@ -909,7 +948,7 @@ pvshm_readpage (struct file *file, struct page *page)
                       &offset);
           set_fs (old_fs);
         }
-      if (multiwrite && !page_has_private (page))
+      if (pvmd->multiwrite && !page_has_private (page))
         {
 /* XXX multiwrite */
           void *twin;
@@ -965,6 +1004,7 @@ static void __exit
 exit_pvshm_fs (void)
 {
   printk ("pvshm module unloaded.\n");
+  if(verbose) printk ("\n\n\n");
 #if (LINUX_VERSION_CODE > KERNEL_VERSION(2,6,27))
   bdi_unregister (&pvshm_backing_dev_info);
 #endif
@@ -977,7 +1017,7 @@ module_exit (exit_pvshm_fs);
 module_param (verbose, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 MODULE_PARM_DESC (verbose, " 1 -> verbose on (default=0)");
 module_param (read_ahead, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-MODULE_PARM_DESC (read_ahead, " Nr. of pages to read ahead, (default=256)");
+MODULE_PARM_DESC (read_ahead, " Nr. of pages to read ahead, (default=1024)");
 
 MODULE_AUTHOR ("Bryan Wayne Lewis");
 MODULE_LICENSE ("GPL");
