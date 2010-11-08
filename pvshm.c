@@ -127,6 +127,19 @@ bdi_setup_and_register (struct backing_dev_info *bdi, char *name,
 }
 #endif
 
+// Used by writepages
+ssize_t
+write_block (struct file * file, char __user * buf, int m, loff_t offset)
+{
+  ssize_t w;
+  mm_segment_t old_fs;
+  old_fs = get_fs ();
+  set_fs (get_ds ());
+  w = vfs_write (file, buf, m * PAGE_SIZE, &offset);
+  set_fs (old_fs);
+  return w;
+}
+
 /* Used by multiwrite */
 struct diff_list
 {
@@ -152,8 +165,8 @@ static int pvshm_writepage (struct page *page, struct writeback_control *wbc);
 static int pvshm_readpage (struct file *file, struct page *page);
 static int pvshm_readpages (struct file *file, struct address_space *mapping,
                             struct list_head *page_list, unsigned nr_pages);
-static int pvshm_writepages(struct address_space *mapping,
-                            struct writeback_control *wbc);
+static int pvshm_writepages (struct address_space *mapping,
+                             struct writeback_control *wbc);
 static int pvshm_set_page_dirty_nobuffers (struct page *page);
 static int pvshm_releasepage (struct page *page, gfp_t gfp_flags);
 static void pvshm_invalidatepage (struct page *page, unsigned long offset);
@@ -353,7 +366,8 @@ pvshm_write (struct file * filp, const char __user * buf, size_t len,
  */
       pvmd->multiwrite = (pvmd->multiwrite + 1) % 2;
       if (verbose)
-        printk ("pvshm multiwrite = %d for %s\n", pvmd->multiwrite, pvmd->path);
+        printk ("pvshm multiwrite = %d for %s\n", pvmd->multiwrite,
+                pvmd->path);
     }
 out:
   return ret;
@@ -784,49 +798,114 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
   return 0;
 }
 
-
+/* This is an experimental routine that writes out blocks of contiguous
+ * pages for efficiency. The largest block size is set, somewhat arbitrarily,
+ * to be the same as read_ahead.
+ */
 static int
-pvshm_writepages(struct address_space *mapping, struct writeback_control *wbc)
+pvshm_writepages (struct address_space *mapping,
+                  struct writeback_control *wbc)
 {
   pgoff_t index;
-  pgoff_t start;
-  pgoff_t end = -1;
-  int n, private, j;
+  pgoff_t end;
+  loff_t offset;
+  int n, j, m, start, k;
   struct page **p;
-  struct inode *inode= mapping->host;
+  void *buf;
+  struct inode *inode = mapping->host;
   pvshm_target *pvmd = (pvshm_target *) inode->i_private;
+  j = 0;
+  start = 0;
+  end = -1;
 // XXX multiwrite block writes not yet implemented
-  if(pvmd->multiwrite) goto out;
+  if (pvmd->multiwrite)
+    goto out1;
   p = kmalloc (sizeof (struct page *) * read_ahead, GFP_NOFS);
-  if (wbc->range_cyclic) 
+  if (wbc->range_cyclic)
     index = mapping->writeback_index;
-  else {
-    index = wbc->range_start >> PAGE_CACHE_SHIFT;
-    end = wbc->range_end >> PAGE_CACHE_SHIFT;
-  }
-  while(index <= end) {
-    n = find_get_pages_tag(mapping, &index, PAGECACHE_TAG_DIRTY, read_ahead, p);
-    if(n == 0) break;
-    if(verbose)  printk("pvshm_writepages ndirty=%d index=%ld\n",n,index);
-// Search the array of dirty pages for contiguous blocks
-    if(n>1) {
-      start = p[0]->index;
-      private = 0;
-      for(j=0;j<(n-1);++j) {
-        private = private && page_has_private(p[j]);
-        if(p[j+1]->index != p[j]->index + 1) {
-printk("BLOCK private=%d start=%ld end=%ld\n",private, start, p[j]->index);
-          start = p[j+1]->index;
-          private = 0;
-        }
-      }
+  else
+    {
+      index = wbc->range_start >> PAGE_CACHE_SHIFT;
+      end = wbc->range_end >> PAGE_CACHE_SHIFT;
     }
-printk("BLOCK private=%d start=%ld end=%ld\n",private, start, p[j]->index);
-  }
-  kfree(p);
+  while (index <= end)
+    {
+      n = find_get_pages_tag (mapping, &index, PAGECACHE_TAG_DIRTY,
+                              read_ahead, p);
+      if (n == 0)
+        break;
+      if (verbose)
+        printk ("pvshm_writepages ndirty=%d index=%ld\n", n, index);
+/* Search the array of dirty pages for contiguous blocks */
+      if (n > 1)
+        {
+          start = 0;
+          for (j = 0; j < (n - 1); ++j)
+            {
+              if (p[j + 1]->index != p[j]->index + 1)
+                {
+                  m = (int) (p[j]->index - p[start]->index + 1);
+                  if (m > 1) {
+                    if (verbose)
+                      printk ("pvshm_writepages start=%ld end=%ld\n",
+                               p[start]->index, p[j]->index);
+                    offset = p[start]->index << PAGE_CACHE_SHIFT;
+                    for (k = 0; k < m; ++k)
+                      {
+                        lock_page (p[start + k]);
+                        clear_page_dirty_for_io (p[start + k]);
+                      }
+                    buf = vmap (&p[start], m, VM_MAP, PAGE_KERNEL);
+                    if (!buf)
+                      goto out;
+                    write_block (pvmd->file, (char __user *) buf, m, offset);
+                    vunmap (buf);
+                    spin_lock_irq (&mapping->tree_lock);
+                    for (k = 0; k < m; ++k)
+                      {
+                        unlock_page (p[start + k]);
+                        radix_tree_tag_clear (&mapping->page_tree,
+                                              page_index (p[start + k]),
+                                              PAGECACHE_TAG_DIRTY);
+                      }
+                    spin_unlock_irq (&mapping->tree_lock);
+                  }
+                  start = j + 1;
+               }
+            }
+        }
+      m = (int) (p[j]->index - p[start]->index + 1);
+      if (m < 2)
+        goto out;
+      if (verbose)
+        printk ("pvshm_writepages start=%ld end=%ld\n", p[start]->index,
+                p[j]->index);
+      offset = p[start]->index << PAGE_CACHE_SHIFT;
+      for (k = 0; k < m; ++k)
+        {
+          lock_page (p[start + k]);
+          clear_page_dirty_for_io (p[start + k]);
+        }
+      buf = vmap (&p[start], m, VM_MAP, PAGE_KERNEL);
+      if (!buf)
+        goto out;
+      write_block (pvmd->file, (char __user *) buf, m, offset);
+      vunmap (buf);
+      spin_lock_irq (&mapping->tree_lock);
+      for (k = 0; k < m; ++k)
+        {
+          unlock_page (p[start + k]);
+          radix_tree_tag_clear (&mapping->page_tree,
+                                page_index (p[start + k]),
+                                PAGECACHE_TAG_DIRTY);
+        }
+      spin_unlock_irq (&mapping->tree_lock);
+    }
 out:
-// Write out any remaining pages
-  return generic_writepages(mapping, wbc);
+  kfree (p);
+out1:
+/* Write out any remaining pages */
+  return generic_writepages (mapping, wbc);
 }
 
 /* read ahead. */
@@ -864,7 +943,6 @@ pvshm_readpages (struct file *file, struct address_space *mapping,
       break;
   }
 /* m now contains the number of contiguous pages at the start of the list. */
-
   buf = vmap (pg_array, m, VM_MAP, PAGE_KERNEL);
   if (!buf)
     {
@@ -1004,7 +1082,8 @@ static void __exit
 exit_pvshm_fs (void)
 {
   printk ("pvshm module unloaded.\n");
-  if(verbose) printk ("\n\n\n");
+  if (verbose)
+    printk ("\n\n\n");
 #if (LINUX_VERSION_CODE > KERNEL_VERSION(2,6,27))
   bdi_unregister (&pvshm_backing_dev_info);
 #endif
