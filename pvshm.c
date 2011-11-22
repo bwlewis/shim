@@ -149,7 +149,7 @@ struct diff_list
 };
 
 /* Superblock and file inode operations */
-/* XXX These should really be static const, but that declaration
+/* XXX These should probably be static const, but that declaration
  * causes compatibility problems with older kernels :(.
  */
 struct inode_operations pvshm_dir_inode_operations;
@@ -657,6 +657,7 @@ pvshm_set_page_dirty_nobuffers (struct page *page)
   return j;
 }
 
+/* Release the private state associated with a page */
 static int
 pvshm_releasepage (struct page *page, gfp_t gfp_flags)
 {
@@ -779,22 +780,36 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
                          PAGE_SIZE, &offset);
           set_fs (old_fs);
         }
-      kunmap (page);
+      kunmap(page);
     }
-  end_page_writeback (page);
+
+  if (!PageUptodate(page))
+    SetPageUptodate(page);
   if (PageError (page))
     ClearPageError (page);
   if (PageLocked (page))
     unlock_page (page);
+
+  end_page_writeback(page);
+
   if (verbose)
-    printk ("pvshm_writepage: %d link=%s [%s] [%s] [%s] [%s] [%s] %d\n",
+    printk ("pvshm_writepage: %d link=%s [%s] [%s] [%s] [%s] count %d nr_to_write %ld\n",
             (int) page->index,
             (char *) pvmd->path,
             PageUptodate (page) ? "Uptodate" : "Not Uptodate",
             PageDirty (page) ? "Dirty" : "Not Dirty",
             PagePrivate (page) ? "Private" : "Not Private",
-            PageReferenced (page) ? "Referenced" : "Not Referenced",
-            PageLocked (page) ? "Locked" : "Unlocked", page_count (page));
+            PageLocked (page) ? "Locked" : "Unlocked", page_count (page),
+            wbc->nr_to_write);
+
+  wbc->nr_to_write -=1;
+  if(wbc->sync_mode == WB_SYNC_NONE) {
+// Called for memory cleansing
+      invalidate_inode_pages2_range(inode->i_mapping,
+                                    page->index,
+                                    page->index);
+  }
+
   return 0;
 }
 
@@ -835,7 +850,7 @@ pvshm_writepages (struct address_space *mapping,
       if (n == 0)
         break;
       if (verbose)
-        printk ("pvshm_writepages ndirty=%d index=%ld\n", n, index);
+        printk ("pvshm_writepages ndirty=%d index=%ld nr_to_write=%ld\n", n, index, wbc->nr_to_write);
 /* Search the array of dirty pages for contiguous blocks */
       if (n > 1)
         {
@@ -900,6 +915,13 @@ pvshm_writepages (struct address_space *mapping,
                                 PAGECACHE_TAG_DIRTY);
         }
       spin_unlock_irq (&mapping->tree_lock);
+      if(wbc->nr_to_write) wbc->nr_to_write -= m;
+      if(wbc->sync_mode == WB_SYNC_NONE) {
+// Called for memory cleansing
+        invalidate_inode_pages2_range(inode->i_mapping,
+                                      p[start]->index,
+                                      p[j]->index);
+      }
     }
 out:
   kfree (p);
