@@ -105,7 +105,7 @@ add_to_page_cache_lru (struct page *page, struct address_space *mapping,
 }
 #endif
 
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,34) && LINUX_VERSION_CODE > KERNEL_VERSION(2,6,27))
+/*
 static atomic_t pvshm_bdi_num = ATOMIC_INIT (0);
 
 int
@@ -125,7 +125,7 @@ bdi_setup_and_register (struct backing_dev_info *bdi, char *name,
 
   return 0;
 }
-#endif
+*/
 
 // Used by writepages
 ssize_t
@@ -149,16 +149,12 @@ struct diff_list
 };
 
 /* Superblock and file inode operations */
-/* XXX These should probably be static const, but that declaration
- * causes compatibility problems with older kernels :(.
- */
-struct inode_operations pvshm_dir_inode_operations;
-struct inode_operations pvshm_file_inode_operations;
-static int pvshm_get_sb (struct file_system_type *fs_type,
-                         int flags, const char *dev_name, void *data,
-                         struct vfsmount *mnt);
+const struct inode_operations pvshm_dir_inode_operations;
+const struct inode_operations pvshm_file_inode_operations;
+struct dentry *pvshm_get_sb (struct file_system_type *fs_type,
+                         int flags, const char *dev_name, void *data);
 struct inode *pvshm_iget (struct super_block *sp, unsigned long ino);
-int pvshm_setattr (struct dentry *dentry, struct iattr *iattr);
+//int pvshm_setattr (struct dentry *dentry, struct iattr *iattr); // XXX XXX
 
 /* Address space operations */
 static int pvshm_writepage (struct page *page, struct writeback_control *wbc);
@@ -169,11 +165,11 @@ static int pvshm_writepages (struct address_space *mapping,
                              struct writeback_control *wbc);
 static int pvshm_set_page_dirty_nobuffers (struct page *page);
 static int pvshm_releasepage (struct page *page, gfp_t gfp_flags);
-static void pvshm_invalidatepage (struct page *page, unsigned long offset);
+static void pvshm_invalidatepage (struct page *page, unsigned int offset, unsigned int length);
 
 /* File operations */
 static int pvshm_file_mmap (struct file *, struct vm_area_struct *);
-static int pvshm_sync_file (struct file *, struct dentry *, int);
+static int pvshm_sync_file (struct file *, loff_t, loff_t, int);
 static ssize_t pvshm_read (struct file *, char __user *, size_t, loff_t *);
 ssize_t pvshm_write (struct file *, const char __user *, size_t, loff_t *);
 
@@ -212,8 +208,8 @@ const struct file_operations pvshm_file_operations = {
   .write = pvshm_write,
 };
 
-struct inode_operations pvshm_file_inode_operations = {
-  .setattr = pvshm_setattr,
+const struct inode_operations pvshm_file_inode_operations = {
+//  .setattr = pvshm_setattr,
   .getattr = simple_getattr,
 };
 
@@ -231,12 +227,13 @@ pvshm_iget (struct super_block *sb, unsigned long ino)
   return inode;
 }
 
-/* XXX inode_setattr is deprecated. Will need to add a kernel version switch.*/
+/* XXX inode_setattr is obsolete
 int
 pvshm_setattr (struct dentry *dentry, struct iattr *iattr)
 {
   return inode_setattr (dentry->d_inode, iattr);
 }
+*/
 
 /* File operations */
 
@@ -388,7 +385,7 @@ out:
 }
 
 static int
-pvshm_sync_file (struct file *f, struct dentry *d, int k)
+pvshm_sync_file (struct file *f, loff_t start, loff_t end, int k)
 {
   pvshm_target *pv_tgt;
   int j = -EBADF;
@@ -406,19 +403,15 @@ out:
 
 /* inode operations */
 struct inode *
-pvshm_get_inode (struct super_block *sb, int mode, dev_t dev)
+pvshm_get_inode (struct super_block *sb, umode_t mode, dev_t dev)
 {
   struct inode *inode = new_inode (sb);
   if (inode)
     {
       inode->i_mode = mode;
-/* XXX why not this?
- *      inode->i_uid = current->fsuid;
- *      inode->i_gid = current->fsgid;
- */
       inode->i_blocks = 0;
       inode->i_mapping->a_ops = &pvshm_aops;
-      inode->i_mapping->backing_dev_info = &pvshm_backing_dev_info;
+//      inode->i_mapping->backing_dev_info = &pvshm_backing_dev_info;  // XXX XXX
       inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
       switch (mode & S_IFMT)
         {
@@ -440,17 +433,19 @@ pvshm_get_inode (struct super_block *sb, int mode, dev_t dev)
           break;
         }
     }
+/*
   if (verbose)
     printk ("pvshm_get_inode capabilities=%d%d%d%d%d%d%d%d\n",
             BYTETOBINARY (inode->i_mapping->backing_dev_info->capabilities));
   if (verbose)
     printk ("pvshm_backing_dev_info.ra_pages = %d\n",
             (int) inode->i_mapping->backing_dev_info->ra_pages);
+*/
   return inode;
 }
 
 static int
-pvshm_mknod (struct inode *dir, struct dentry *dentry, int mode, dev_t dev)
+pvshm_mknod (struct inode *dir, struct dentry *dentry, umode_t mode, dev_t dev)
 {
   int error = -ENOSPC;
   struct inode *inode = pvshm_get_inode (dir->i_sb, mode, dev);
@@ -474,7 +469,7 @@ pvshm_mknod (struct inode *dir, struct dentry *dentry, int mode, dev_t dev)
 }
 
 static int
-pvshm_mkdir (struct inode *dir, struct dentry *dentry, int mode)
+pvshm_mkdir (struct inode *dir, struct dentry *dentry, umode_t mode)
 {
   int retval = pvshm_mknod (dir, dentry, mode | S_IFDIR, 0);
   if (!retval)
@@ -483,8 +478,8 @@ pvshm_mkdir (struct inode *dir, struct dentry *dentry, int mode)
 }
 
 static int
-pvshm_create (struct inode *dir, struct dentry *dentry, int mode,
-              struct nameidata *nd)
+pvshm_create (struct inode *dir, struct dentry *dentry, umode_t mode,
+              bool exclusive)
 {
   return pvshm_mknod (dir, dentry, mode | S_IFREG, 0);
 }
@@ -544,7 +539,7 @@ pvshm_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
   inode->i_gid = stat.gid;
   inode->i_fop = &pvshm_file_operations;
   inode->i_mapping->a_ops = &pvshm_aops;
-  inode->i_mapping->backing_dev_info = &pvshm_backing_dev_info;
+//  inode->i_mapping->backing_dev_info = &pvshm_backing_dev_info;   // XXX XXX
   if (verbose)
     printk ("pvshm_symlink d_name=%s, symname=%s\n",
             dentry->d_name.name, symname);
@@ -585,7 +580,7 @@ end:
   return error;
 }
 
-struct inode_operations pvshm_dir_inode_operations = {
+const struct inode_operations pvshm_dir_inode_operations = {
   .create = pvshm_create,
   .link = simple_link,
   .unlink = pvshm_unlink,
@@ -600,7 +595,7 @@ struct inode_operations pvshm_dir_inode_operations = {
 
 static struct file_system_type pvshm_fs_type = {
   .name = "pvshm",
-  .get_sb = pvshm_get_sb,
+  .mount = pvshm_get_sb,
   .kill_sb = kill_litter_super,
   .owner = THIS_MODULE,
 };
@@ -624,7 +619,7 @@ pvshm_fill_super (struct super_block *sb, void *data, int silent)
   if (!pvshm_root_inode)
     return -ENOMEM;
 
-  root = d_alloc_root (pvshm_root_inode);
+  root = d_make_root (pvshm_root_inode);
   if (!root)
     {
       iput (pvshm_root_inode);
@@ -634,12 +629,11 @@ pvshm_fill_super (struct super_block *sb, void *data, int silent)
   return 0;
 }
 
-int
-pvshm_get_sb (struct file_system_type *fs_type,
-              int flags, const char *dev_name, void *data,
-              struct vfsmount *mnt)
+struct
+dentry *pvshm_get_sb (struct file_system_type *fs_type,
+              int flags, const char *dev_name, void *data)
 {
-  return get_sb_nodev (fs_type, flags, data, pvshm_fill_super, mnt);
+  return mount_nodev (fs_type, flags, data, pvshm_fill_super);
 }
 
 static int
@@ -676,7 +670,7 @@ pvshm_releasepage (struct page *page, gfp_t gfp_flags)
 }
 
 static void
-pvshm_invalidatepage (struct page *page, unsigned long offset)
+pvshm_invalidatepage (struct page *page, unsigned int offset, unsigned int length)
 {
   if (verbose)
     {
@@ -1079,22 +1073,16 @@ init_pvshm_fs (void)
 {
   int j;
   pvshm_backing_dev_info.ra_pages = (unsigned long) read_ahead;
-  pvshm_backing_dev_info.capabilities = BDI_CAP_SWAP_BACKED;
-#if (LINUX_VERSION_CODE > KERNEL_VERSION(2,6,27))
-  j = bdi_setup_and_register (&pvshm_backing_dev_info, "pvshm",
-                              BDI_CAP_SWAP_BACKED);
+  j = bdi_setup_and_register (&pvshm_backing_dev_info, "pvshm");
   if (j)
     {
       printk ("pvshm ERROR initializing bdi\n");
       return (j);
     }
-#endif
   j = register_filesystem (&pvshm_fs_type);
-#if (LINUX_VERSION_CODE > KERNEL_VERSION(2,6,27))
   if (j)
     bdi_destroy (&pvshm_backing_dev_info);
   else
-#endif
     printk ("pvshm module loaded, ra_pages = %d.\n",
             (int) pvshm_backing_dev_info.ra_pages);
   return j;
@@ -1106,9 +1094,7 @@ exit_pvshm_fs (void)
   printk ("pvshm module unloaded.\n");
   if (verbose)
     printk ("\n\n\n");
-#if (LINUX_VERSION_CODE > KERNEL_VERSION(2,6,27))
-  bdi_unregister (&pvshm_backing_dev_info);
-#endif
+//  bdi_unregister (&pvshm_backing_dev_info); XXX removed
   unregister_filesystem (&pvshm_fs_type);
 }
 

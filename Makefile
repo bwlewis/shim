@@ -8,5 +8,5 @@ default:
 	$(MAKE) -C ${KERNEL_SOURCE} SUBDIRS=$(PWD) modules
 clean :
 	$(MAKE) -C ${KERNEL_SOURCE} SUBDIRS=$(PWD) clean
-	rm -f  *~ *.o *.ko 
+	rm -f  *~ *.o *.ko  *.o.ur-safe"
 endif
