@@ -37,44 +37,60 @@ is created, the backing file is opened for reading and writing by the module.
 Deleting a symbolic link closes the open file descriptor to the backing file
 and de-allocates data structures used by pvshm internally.  Although memory
 mapping is the main design objective, basic read and write file operations are
-supported for convenience.  Pvshm now supports multiple simultaneous writers
-with byte-level granularity, but a memory overhead is incurred. See the NOTES
-for more detailed information.
+supported for convenience.
+
+Writes to the backing file are updated with kernel-page granularity for now.
+Future versions will include byte-addressible backing file updates.
 
 
 Cache consistency
 
-Pvshm does not automatically enforce cache consistency between multiple
-processes mapping the same file. Instead, pvshm leaves that to applications
-by providing functions for managing the page cache.
+Pvshm does not enforce cache consistency between multiple processes mapping the
+same file.
 
 The standard msync call is implemented. When called by a process, mysnc causes
 cached pages that have been flagged as changed to be written back to the
 backing file.
 
-Pvshm provides a function to explicitly populate the page cache with data from
+Pvshm provides a function to explicitly refresh the page cache with data from
 the backing file, replacing any data already in the cache (sort of a reverse
 msync). This function is implemented using a variation of the standard read
-function (using read allows us to provide this functionality to applications
-through standard and universally available system libraries). Calling the
-standard read function results in a pass-through read operation to the
-corresponding backing file. However, if the buffer argument to the read
-function is NULL, there will be no pass-through read and instead the pages in
-the page cache range associated with the extent of the read call will be
-updated with data from the backing file. Consider the following example:
+function. Using read allows us to provide this functionality to applications
+through universally-available system libraries. Normally, the standard read
+function results in a pass-through read operation to the corresponding backing
+file. However, if the buffer argument to the read function is NULL, there will
+be no pass-through read and instead the pages in the page cache range
+associated with the extent of the read call will be updated with data from the
+backing file. Consider the following standard read example:
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 int fd = open("/path/to/pvshm/file", O_RDWR);
 size_t count = 555;
 void *buf = (void *)malloc(count);
+lseek(fd, 5000, SEEK_SET);
 read(fd, buf, count);
 
-The above example will read 555 bytes as expected from the current file
-position in the file. However, this next example will simply update the page
-cache with data from the backing file covering the requested 555 bytes
-(in particular, the first page will be updated):
+The example reads 555 bytes starting at the 5000th byte from the file into the
+buffer buf. With a standard kernel page size of 4096 bytes, this read occurs
+completely in the 2nd page of the file mapping.  Compare that to the next
+example which simply updates the 2nd page of the mapping in the page cache
+(covering the requested read range) with data from the backing file:
 
-size_t count = 555;
+lseek(fd, 5000, SEEK_SET);
 read(fd, NULL, count);
+
+It's possible that multiple applications across different computers in a
+network share the same backing file.  The applications can use a combination of
+msync and the above read hack 'reverse msync' to coordinate data consistency
+between their respective page caches and the backing file when one or more
+application is writing data.
+
+Beware that read and msync are not generally atomic operations across more than
+one kernel page. Use these operations together with a distributed locking or
+consensus algorithm for consistency across distributed applications.
 
 
 Example
