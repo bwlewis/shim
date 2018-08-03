@@ -57,11 +57,11 @@ the backing file, replacing any data already in the cache (sort of a reverse
 msync). This function is implemented using a variation of the standard read
 function (using read allows us to provide this functionality to applications
 through standard and universally available system libraries). Calling the
-standard read function results in a (somewhat inefficient) pass-through read
-operation to the corresponding backing file. However, if the buffer argument to
-the read function is zero, there will be no pass-through read and instead the
-pages in the page cache range associated with the extent of the read call will
-be updated with data from the backing file. Consider the following example:
+standard read function results in a pass-through read operation to the
+corresponding backing file. However, if the buffer argument to the read
+function is NULL, there will be no pass-through read and instead the pages in
+the page cache range associated with the extent of the read call will be
+updated with data from the backing file. Consider the following example:
 
 int fd = open("/path/to/pvshm/file", O_RDWR);
 size_t count = 555;
@@ -70,10 +70,11 @@ read(fd, buf, count);
 
 The above example will read 555 bytes as expected from the current file
 position in the file. However, this next example will simply update the page
-cache with data from the backing file covering the requested 555 bytes:
+cache with data from the backing file covering the requested 555 bytes
+(in particular, the first page will be updated):
 
 size_t count = 555;
-read(fd, 0, count);
+read(fd, NULL, count);
 
 
 Example

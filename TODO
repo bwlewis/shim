@@ -1,0 +1,6 @@
+- Re-introduce single-byte multiple writer updates.
+  Currently, writers modify whole pages only.
+- Error checking for mappings exceeding backing file size.
+
+provisionally done:
+- Fix 'reverse sync' hack

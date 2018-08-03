@@ -6,7 +6,7 @@ PWD := $(shell pwd)
 
 default:
 	$(MAKE) -C ${KERNEL_SOURCE} SUBDIRS=$(PWD) modules
-clean :
+clean:
 	$(MAKE) -C ${KERNEL_SOURCE} SUBDIRS=$(PWD) clean
-	rm -f  *~ *.o *.ko  *.o.ur-safe"
+	rm -f  *~ *.o *.ko  *.o.ur-safe a.out
 endif

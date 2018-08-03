@@ -50,111 +50,34 @@
 #include <linux/mpage.h>
 #include <linux/pagemap.h>
 #include <linux/vmalloc.h>
-
-#define BYTETOBINARY(byte)  \
-  (byte & 0x80 ? 1 : 0), \
-  (byte & 0x40 ? 1 : 0), \
-  (byte & 0x20 ? 1 : 0), \
-  (byte & 0x10 ? 1 : 0), \
-  (byte & 0x08 ? 1 : 0), \
-  (byte & 0x04 ? 1 : 0), \
-  (byte & 0x02 ? 1 : 0), \
-  (byte & 0x01 ? 1 : 0)
+#include <linux/uio.h>
 
 #define PVSHM_MAGIC	0x55566655
 #define list_to_page(head) (list_entry((head)->prev, struct page, lru))
 
-int verbose = 0;
+int verbose = 1;
 unsigned int read_ahead = 1024;
-
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27))
-#define page_has_private(page) PagePrivate(page)
-#define BDI_CAP_SWAP_BACKED     0x00000100
-static inline int
-trylock_page (struct page *page)
-{
-  return (likely (!test_and_set_bit (PG_locked, &page->flags)));
-}
-
-/* Unfortunately, add_to_page_cache_lru is not exported by 2.6.26.x and
- * earlier kernels.
- */
-static DEFINE_PER_CPU (struct pagevec, lru_add_pvecs) =
-{
-0,};
-
-void
-lru_cache_add (struct page *page)
-{
-  struct pagevec *pvec = &get_cpu_var (lru_add_pvecs);
-
-  page_cache_get (page);
-  if (!pagevec_add (pvec, page))
-    __pagevec_lru_add (pvec);
-  put_cpu_var (lru_add_pvecs);
-}
-
-int
-add_to_page_cache_lru (struct page *page, struct address_space *mapping,
-                       pgoff_t offset, gfp_t gfp_mask)
-{
-  int ret = add_to_page_cache (page, mapping, offset, gfp_mask);
-  if (ret == 0)
-    lru_cache_add (page);
-  return ret;
-}
-#endif
-
-/*
-static atomic_t pvshm_bdi_num = ATOMIC_INIT (0);
-
-int
-bdi_setup_and_register (struct backing_dev_info *bdi, char *name,
-                        unsigned int cap)
-{
-  int err;
-  bdi->capabilities = cap;
-  err = bdi_init (bdi);
-  bdi->ra_pages = (unsigned long) read_ahead;
-  if (err)
-    return err;
-  err =
-    bdi_register (bdi, NULL, "pvshm-%d", atomic_inc_return (&pvshm_bdi_num));
-  if (err)
-    return err;
-
-  return 0;
-}
-*/
 
 // Used by writepages
 ssize_t
-write_block (struct file * file, char __user * buf, int m, loff_t offset)
+write_block (struct file *file, char __user * buf, int m, loff_t offset)
 {
   ssize_t w;
   mm_segment_t old_fs;
   old_fs = get_fs ();
   set_fs (get_ds ());
-  w = vfs_write (file, buf, m * PAGE_SIZE, &offset);
+  w = kernel_write (file, buf, m * PAGE_SIZE, &offset);
   set_fs (old_fs);
   return w;
 }
-
-/* Used by multiwrite */
-struct diff_list
-{
-  struct list_head list;
-  int start;
-  int length;
-};
 
 /* Superblock and file inode operations */
 const struct inode_operations pvshm_dir_inode_operations;
 const struct inode_operations pvshm_file_inode_operations;
 struct dentry *pvshm_get_sb (struct file_system_type *fs_type,
-                         int flags, const char *dev_name, void *data);
+                             int flags, const char *dev_name, void *data);
 struct inode *pvshm_iget (struct super_block *sp, unsigned long ino);
-//int pvshm_setattr (struct dentry *dentry, struct iattr *iattr); // XXX XXX
+int pvshm_setattr (struct dentry *dentry, struct iattr *iattr);
 
 /* Address space operations */
 static int pvshm_writepage (struct page *page, struct writeback_control *wbc);
@@ -165,13 +88,15 @@ static int pvshm_writepages (struct address_space *mapping,
                              struct writeback_control *wbc);
 static int pvshm_set_page_dirty_nobuffers (struct page *page);
 static int pvshm_releasepage (struct page *page, gfp_t gfp_flags);
-static void pvshm_invalidatepage (struct page *page, unsigned int offset, unsigned int length);
+static void pvshm_invalidatepage (struct page *page, unsigned int offset,
+                                  unsigned int length);
 
 /* File operations */
 static int pvshm_file_mmap (struct file *, struct vm_area_struct *);
 static int pvshm_sync_file (struct file *, loff_t, loff_t, int);
-static ssize_t pvshm_read (struct file *, char __user *, size_t, loff_t *);
 ssize_t pvshm_write (struct file *, const char __user *, size_t, loff_t *);
+ssize_t pvshm_read (struct file *, char __user *, size_t, loff_t *);
+ssize_t pvshm_file_read_iter (struct kiocb *, struct iov_iter *);
 
 /*
  * path: The target file full path
@@ -183,7 +108,6 @@ typedef struct
   char *path;
   loff_t max_size;
   struct file *file;
-  int multiwrite;
 } pvshm_target;
 
 
@@ -204,16 +128,17 @@ const struct address_space_operations pvshm_aops = {
 const struct file_operations pvshm_file_operations = {
   .mmap = pvshm_file_mmap,
   .fsync = pvshm_sync_file,
-  .read = pvshm_read,
+  .llseek = generic_file_llseek,
+  .read_iter = pvshm_file_read_iter,
   .write = pvshm_write,
+  .llseek = generic_file_llseek,
+  .splice_read = generic_file_splice_read,
 };
 
 const struct inode_operations pvshm_file_inode_operations = {
-//  .setattr = pvshm_setattr,
   .getattr = simple_getattr,
 };
 
-struct backing_dev_info pvshm_backing_dev_info;
 
 /* Inode operations */
 struct inode *
@@ -227,24 +152,39 @@ pvshm_iget (struct super_block *sb, unsigned long ino)
   return inode;
 }
 
-/* XXX inode_setattr is obsolete
-int
-pvshm_setattr (struct dentry *dentry, struct iattr *iattr)
-{
-  return inode_setattr (dentry->d_inode, iattr);
-}
-*/
 
 /* File operations */
 
-void
-pvshm_read_again (struct file *file, struct address_space *mapping,
-                  pgoff_t start, pgoff_t end)
+/* Pass normal read operations through to the backing file.
+ *
+ * Use lseek and read with a NULL buffer to 'reverse msync' the page mapping
+ * over the pages covering the byte range following the lseek and including
+ * bytes specified in the (fake) read operation.
+ */
+ssize_t
+pvshm_file_read_iter (struct kiocb * iocb, struct iov_iter * iter)
 {
+  struct file *file;
+  struct address_space *mapping;
+  struct inode *inode;
+  pgoff_t pstart, pend;
   struct pagevec pvec;
   int i;
-  pagevec_init (&pvec, 0);
-  pagevec_lookup (&pvec, mapping, start, end);
+
+  size_t count = iov_iter_count (iter);
+  printk ("pvshm_file_read_iter %d\n", (int) count);
+  if (iter->iov->iov_base)
+    return generic_file_read_iter (iocb, iter);
+
+  file = iocb->ki_filp;
+  mapping = file->f_mapping;
+  inode = mapping->host;
+  pstart = iocb->ki_pos >> PAGE_SHIFT;
+  pend = ((iocb->ki_pos + count + PAGE_SIZE - 1) >> PAGE_SHIFT);
+// XXX add page index range check
+
+  pagevec_init (&pvec);
+  pagevec_lookup_range (&pvec, mapping, &pstart, pend);
   for (i = 0; i < pagevec_count (&pvec); i++)
     {
       struct page *page = pvec.pages[i];
@@ -254,7 +194,7 @@ pvshm_read_again (struct file *file, struct address_space *mapping,
       index = page->index;
       ClearPageUptodate (page);
       if (verbose)
-        printk ("read_again: page->index=%d %s %s\n",
+        printk ("reverse sync: page->index=%d %s %s\n",
                 (int) page->index,
                 PageUptodate (page) ? "Uptodate" :
                 "Not Uptodate", PageLocked (page) ? "Locked" : "Unlocked");
@@ -263,79 +203,13 @@ pvshm_read_again (struct file *file, struct address_space *mapping,
       pvshm_readpage (file, page);
     }
   pagevec_release (&pvec);
-}
-
-/* Pvshm uses the read function for two purposes:
- * 1. Provide a (somewhat slow) traditional read operation against
- *    the backing file.
- * 2. Provide a mechanism for forcing a page cache update from the
- *    backing file.
- * The second purpose provides a sort of reverse msync to applications,
- * especially useful with parallel file systems. It's triggered exactly
- * like read, but with a NULL buffer. The pages containing the read
- * request will be updated from the backing file to the page cache.
- */
-static ssize_t
-pvshm_read (struct file *filp, char __user * buf, size_t len, loff_t * skip)
-{
-  loff_t lstart, lend;
-  pgoff_t pstart, pend;
-  mm_segment_t old_fs;
-  ssize_t ret = -EBADF;
-  struct inode *inode = filp->f_mapping->host;
-  struct address_space *mapping = inode->i_mapping;
-  pvshm_target *pvmd = (pvshm_target *) inode->i_private;
-  if (!pvmd)
-    goto out;
-  lstart = *skip;
-  lend = lstart + (loff_t) len;
-  pstart = (lstart + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
-  pend = (lend >> PAGE_CACHE_SHIFT);
-  if (verbose)
-    printk ("pvshm_read pstart=%d pend=%d ", (int) pstart, (int) pend);
-  if (verbose)
-    printk ("nrpages=%d \n", (int) mapping->nrpages);
-  mutex_lock (&filp->f_mapping->host->i_mutex);
-/* I tried simply the following first, but it's not enough. Note that we are
- * generally not free to eject the page either as it may be in use by somebody,
- * hence the pvshm_read_again function.
- *      invalidate_mapping_pages (mapping, pstart, pend); 
- */
-  pvshm_read_again (filp, mapping, pstart, pend);
-  mutex_unlock (&filp->f_mapping->host->i_mutex);
-  if (verbose)
-    printk ("pvshm_read cache update OK\n");
-/* A non-zero buffer address triggers a standard read operation on
- * the backing file:
- */
-  if (buf)
-    {
-      old_fs = get_fs ();
-      set_fs (KERNEL_DS);
-      ret = vfs_read (pvmd->file, (char __user *) buf, len, skip);
-      set_fs (old_fs);
-      if (verbose)
-        printk ("pvshm_read backing file into user buffer\n");
-    }
-out:
-  return ret;
+  return 0;
 }
 
 /* pvshm_write
  *
  * The pvshm_write function passes usual write operations to the backing file.
- * Similarly to pvshm_read, we define a special write operation designed to
- * facilitate multiple writers into different bytes within a page.
- * 
- * Call pvshm_write with a null (0) buffer toggles "twin" mode. Twin mode
- * forces pvshm_readpage to copy each page and mark them private.  The private
- * field holds the address of the copy of the original page. When each such
- * page is eventually committed to the backing file, the a bitwise difference
- * between the cached page and the copied original page is written and the
- * dirty and private flags are cleared.
- *
  */
-
 ssize_t
 pvshm_write (struct file * filp, const char __user * buf, size_t len,
              loff_t * skip)
@@ -350,21 +224,10 @@ pvshm_write (struct file * filp, const char __user * buf, size_t len,
     {
       old_fs = get_fs ();
       set_fs (KERNEL_DS);
-      ret = vfs_write (pvmd->file, (char __user *) buf, len, skip);
+      ret = kernel_write (pvmd->file, (char __user *) buf, len, skip);
       set_fs (old_fs);
       if (verbose)
         printk ("pvshm_write to backing file %s\n", pvmd->path);
-    }
-  else
-    {
-/* XXX experimental multiple writer code...
- * Toggle multiwrite status. This hack kind of sucks, maybe
- * improve this with file attributes?
- */
-      pvmd->multiwrite = (pvmd->multiwrite + 1) % 2;
-      if (verbose)
-        printk ("pvshm multiwrite = %d for %s\n", pvmd->multiwrite,
-                pvmd->path);
     }
 out:
   return ret;
@@ -390,11 +253,12 @@ pvshm_sync_file (struct file *f, loff_t start, loff_t end, int k)
   pvshm_target *pv_tgt;
   int j = -EBADF;
   struct inode *inode = f->f_mapping->host;
+
   pv_tgt = (pvshm_target *) inode->i_private;
   if (!pv_tgt)
     goto out;
   if (verbose)
-    printk ("pvshm_sync_file %s\n", pv_tgt->path);
+    printk ("pvshm_sync_file %s k=%d\n", pv_tgt->path, k);
   j = filemap_write_and_wait (f->f_mapping);
 out:
   return j;
@@ -411,8 +275,8 @@ pvshm_get_inode (struct super_block *sb, umode_t mode, dev_t dev)
       inode->i_mode = mode;
       inode->i_blocks = 0;
       inode->i_mapping->a_ops = &pvshm_aops;
-//      inode->i_mapping->backing_dev_info = &pvshm_backing_dev_info;  // XXX XXX
-      inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
+      inode->i_atime = inode->i_mtime = inode->i_ctime =
+        current_kernel_time ();
       switch (mode & S_IFMT)
         {
         default:
@@ -433,19 +297,12 @@ pvshm_get_inode (struct super_block *sb, umode_t mode, dev_t dev)
           break;
         }
     }
-/*
-  if (verbose)
-    printk ("pvshm_get_inode capabilities=%d%d%d%d%d%d%d%d\n",
-            BYTETOBINARY (inode->i_mapping->backing_dev_info->capabilities));
-  if (verbose)
-    printk ("pvshm_backing_dev_info.ra_pages = %d\n",
-            (int) inode->i_mapping->backing_dev_info->ra_pages);
-*/
   return inode;
 }
 
 static int
-pvshm_mknod (struct inode *dir, struct dentry *dentry, umode_t mode, dev_t dev)
+pvshm_mknod (struct inode *dir, struct dentry *dentry, umode_t mode,
+             dev_t dev)
 {
   int error = -ENOSPC;
   struct inode *inode = pvshm_get_inode (dir->i_sb, mode, dev);
@@ -463,7 +320,7 @@ pvshm_mknod (struct inode *dir, struct dentry *dentry, umode_t mode, dev_t dev)
       d_instantiate (dentry, inode);
       dget (dentry);
       error = 0;
-      dir->i_mtime = dir->i_ctime = CURRENT_TIME;
+      dir->i_mtime = dir->i_ctime = current_kernel_time ();
     }
   return error;
 }
@@ -531,7 +388,6 @@ pvshm_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
       goto end;
     }
   pvmd->max_size = stat.size;
-  pvmd->multiwrite = 0;
 
   inode = pvshm_iget (dir->i_sb, j);
   inode->i_mode = stat.mode;
@@ -539,7 +395,6 @@ pvshm_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
   inode->i_gid = stat.gid;
   inode->i_fop = &pvshm_file_operations;
   inode->i_mapping->a_ops = &pvshm_aops;
-//  inode->i_mapping->backing_dev_info = &pvshm_backing_dev_info;   // XXX XXX
   if (verbose)
     printk ("pvshm_symlink d_name=%s, symname=%s\n",
             dentry->d_name.name, symname);
@@ -570,7 +425,7 @@ pvshm_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
           inode->i_size = stat.size;
           d_instantiate (dentry, inode);
           dget (dentry);
-          dir->i_mtime = dir->i_ctime = CURRENT_TIME;
+          dir->i_mtime = dir->i_ctime = current_kernel_time ();
         }
       else
         iput (inode);
@@ -605,16 +460,23 @@ pvshm_fill_super (struct super_block *sb, void *data, int silent)
 {
   static struct inode *pvshm_root_inode;
   struct dentry *root;
+  int j;
 
   if (verbose)
     printk ("pvshm_fill_super\n");
   sb->s_maxbytes = MAX_LFS_FILESIZE;
-  sb->s_blocksize = PAGE_CACHE_SIZE;
-  sb->s_blocksize_bits = PAGE_CACHE_SHIFT;
+  sb->s_blocksize = PAGE_SIZE;
+  sb->s_blocksize_bits = PAGE_SHIFT;
   sb->s_magic = PVSHM_MAGIC;
   sb->s_op = &pvshm_sops;
   sb->s_type = &pvshm_fs_type;
   sb->s_time_gran = 1;
+  j = super_setup_bdi (sb);
+  if (j)
+    return j;
+  sb->s_bdi->ra_pages = read_ahead;
+  if (verbose)
+    printk ("sb->s_bdi->ra_pages = %u\n", read_ahead);
   pvshm_root_inode = pvshm_get_inode (sb, S_IFDIR | 0755, 0);
   if (!pvshm_root_inode)
     return -ENOMEM;
@@ -629,8 +491,8 @@ pvshm_fill_super (struct super_block *sb, void *data, int silent)
   return 0;
 }
 
-struct
-dentry *pvshm_get_sb (struct file_system_type *fs_type,
+struct dentry *
+pvshm_get_sb (struct file_system_type *fs_type,
               int flags, const char *dev_name, void *data)
 {
   return mount_nodev (fs_type, flags, data, pvshm_fill_super);
@@ -655,13 +517,6 @@ pvshm_set_page_dirty_nobuffers (struct page *page)
 static int
 pvshm_releasepage (struct page *page, gfp_t gfp_flags)
 {
-  if (page_has_private (page))
-    {
-/* deallocate multiwrite twin copy of the page */
-      kfree ((const void *) ((page)->private));
-      set_page_private (page, 0);
-      ClearPagePrivate (page);
-    }
   if (verbose)
     {
       printk ("pvshm_releasepage private = %d\n", PagePrivate (page));
@@ -670,7 +525,8 @@ pvshm_releasepage (struct page *page, gfp_t gfp_flags)
 }
 
 static void
-pvshm_invalidatepage (struct page *page, unsigned int offset, unsigned int length)
+pvshm_invalidatepage (struct page *page, unsigned int offset,
+                      unsigned int length)
 {
   if (verbose)
     {
@@ -688,11 +544,10 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
   struct inode *inode;
   void *page_addr;
   pvshm_target *pvmd;
-  int m;
 
   inode = page->mapping->host;
   pvmd = (pvshm_target *) inode->i_private;
-  offset = page->index << PAGE_CACHE_SHIFT;
+  offset = page->index << PAGE_SHIFT;
   j = 1;
   test_set_page_writeback (page);
   if (pvmd->file)
@@ -701,108 +556,40 @@ pvshm_writepage (struct page *page, struct writeback_control *wbc)
  * precluding the speedier page_addr = kmap_atomic (page, KM_USER0).
  */
       page_addr = kmap (page);
-/* PagePrivate indicates that we are writing to this page respective of
- * other writers. In such cases we compare against a cached twin page and
- * write out only bytes that have changed. Otherwise the whole page is written.
- */
-      m = 0;
-      if (page_has_private (page))
-        m = memcmp ((const void *) (page->private),
-                    (const void *) page_addr, PAGE_SIZE);
-      if (m != 0)
-        {
-          int k, n, h;
-          loff_t xoffset;
-          void *xpage_addr;
-          struct diff_list diff;
-          struct list_head *l, *q;
-          struct diff_list *dt = NULL;
-          char *A = (char *) (page->private);
-          char *B = (char *) page_addr;
-          INIT_LIST_HEAD (&diff.list);
-/* Compute a diff and write back only altered bytes. */
-          if (verbose)
-            printk ("writing difference page\n");
-          n = 0;
-          h = 0;
-          for (k = 0; k < PAGE_SIZE; ++k)
-            {
-              if (A[k] != B[k])
-                {
-                  if (h == 0)
-                    {
-                      dt =
-                        (struct diff_list *)
-                        kmalloc (sizeof (struct diff_list), 0);
-                      dt->start = k;
-                      h = 1;
-                    }
-                }
-              else
-                {
-                  if (h == 1)
-                    {
-                      h = 0;
-                      dt->length = k - dt->start;
-                      list_add (&(dt->list), &(diff.list));
-                    }
-                }
-            }
-          old_fs = get_fs ();
-          list_for_each_safe (l, q, &diff.list)
-          {
-            dt = list_entry (l, struct diff_list, list);
-            if (verbose)
-              printk ("pvshm_writepage (diff) start=%d len=%d\n", dt->start,
-                      dt->length);
-            xoffset = offset + dt->start;
-            xpage_addr = (char __user *) page_addr;
-            xpage_addr = xpage_addr + dt->start;
-            set_fs (get_ds ());
-            vfs_write (pvmd->file, xpage_addr, dt->length, &xoffset);
-            set_fs (old_fs);
-            list_del (l);
-            kfree (dt);
-          }
-        }
-      else
-        {
-/* Write back the whole page */
-          old_fs = get_fs ();
-          set_fs (get_ds ());
-          j = vfs_write (pvmd->file, (char __user *) page_addr,
-                         PAGE_SIZE, &offset);
-          set_fs (old_fs);
-        }
-      kunmap(page);
+      old_fs = get_fs ();
+      set_fs (get_ds ());
+      j = kernel_write (pvmd->file, (char __user *) page_addr,
+                        PAGE_SIZE, &offset);
+      set_fs (old_fs);
+      kunmap (page);
     }
 
-  if (!PageUptodate(page))
-    SetPageUptodate(page);
+  if (!PageUptodate (page))
+    SetPageUptodate (page);
   if (PageError (page))
     ClearPageError (page);
   if (PageLocked (page))
     unlock_page (page);
 
-  end_page_writeback(page);
+  end_page_writeback (page);
 
   if (verbose)
-    printk ("pvshm_writepage: %d link=%s [%s] [%s] [%s] [%s] count %d nr_to_write %ld\n",
-            (int) page->index,
-            (char *) pvmd->path,
-            PageUptodate (page) ? "Uptodate" : "Not Uptodate",
-            PageDirty (page) ? "Dirty" : "Not Dirty",
-            PagePrivate (page) ? "Private" : "Not Private",
-            PageLocked (page) ? "Locked" : "Unlocked", page_count (page),
-            wbc->nr_to_write);
+    printk
+      ("pvshm_writepage: %d link=%s [%s] [%s] [%s] [%s] count %d nr_to_write %ld\n",
+       (int) page->index, (char *) pvmd->path,
+       PageUptodate (page) ? "Uptodate" : "Not Uptodate",
+       PageDirty (page) ? "Dirty" : "Not Dirty",
+       PagePrivate (page) ? "Private" : "Not Private",
+       PageLocked (page) ? "Locked" : "Unlocked", page_count (page),
+       wbc->nr_to_write);
 
-  wbc->nr_to_write -=1;
-  if(wbc->sync_mode == WB_SYNC_NONE) {
+  wbc->nr_to_write -= 1;
+  if (wbc->sync_mode == WB_SYNC_NONE)
+    {
 // Called for memory cleansing
-      invalidate_inode_pages2_range(inode->i_mapping,
-                                    page->index,
-                                    page->index);
-  }
+      invalidate_inode_pages2_range (inode->i_mapping,
+                                     page->index, page->index);
+    }
 
   return 0;
 }
@@ -826,16 +613,13 @@ pvshm_writepages (struct address_space *mapping,
   j = 0;
   start = 0;
   end = -1;
-// XXX multiwrite block writes not yet implemented
-  if (pvmd->multiwrite)
-    goto out1;
   p = kmalloc (sizeof (struct page *) * read_ahead, GFP_NOFS);
   if (wbc->range_cyclic)
     index = mapping->writeback_index;
   else
     {
-      index = wbc->range_start >> PAGE_CACHE_SHIFT;
-      end = wbc->range_end >> PAGE_CACHE_SHIFT;
+      index = wbc->range_start >> PAGE_SHIFT;
+      end = wbc->range_end >> PAGE_SHIFT;
     }
   while (index <= end)
     {
@@ -844,7 +628,8 @@ pvshm_writepages (struct address_space *mapping,
       if (n == 0)
         break;
       if (verbose)
-        printk ("pvshm_writepages ndirty=%d index=%ld nr_to_write=%ld\n", n, index, wbc->nr_to_write);
+        printk ("pvshm_writepages ndirty=%d index=%ld nr_to_write=%ld\n", n,
+                index, wbc->nr_to_write);
 /* Search the array of dirty pages for contiguous blocks */
       if (n > 1)
         {
@@ -854,33 +639,35 @@ pvshm_writepages (struct address_space *mapping,
               if (p[j + 1]->index != p[j]->index + 1)
                 {
                   m = (int) (p[j]->index - p[start]->index + 1);
-                  if (m > 1) {
-                    if (verbose)
-                      printk ("pvshm_writepages start=%ld end=%ld\n",
-                               p[start]->index, p[j]->index);
-                    offset = p[start]->index << PAGE_CACHE_SHIFT;
-                    for (k = 0; k < m; ++k)
-                      {
-                        lock_page (p[start + k]);
-                        clear_page_dirty_for_io (p[start + k]);
-                      }
-                    buf = vmap (&p[start], m, VM_MAP, PAGE_KERNEL);
-                    if (!buf)
-                      goto out;
-                    write_block (pvmd->file, (char __user *) buf, m, offset);
-                    vunmap (buf);
-                    spin_lock_irq (&mapping->tree_lock);
-                    for (k = 0; k < m; ++k)
-                      {
-                        unlock_page (p[start + k]);
-                        radix_tree_tag_clear (&mapping->page_tree,
-                                              page_index (p[start + k]),
-                                              PAGECACHE_TAG_DIRTY);
-                      }
-                    spin_unlock_irq (&mapping->tree_lock);
-                  }
+                  if (m > 1)
+                    {
+                      if (verbose)
+                        printk ("pvshm_writepages start=%ld end=%ld\n",
+                                p[start]->index, p[j]->index);
+                      offset = p[start]->index << PAGE_SHIFT;
+                      for (k = 0; k < m; ++k)
+                        {
+                          lock_page (p[start + k]);
+                          clear_page_dirty_for_io (p[start + k]);
+                        }
+                      buf = vmap (&p[start], m, VM_MAP, PAGE_KERNEL);
+                      if (!buf)
+                        goto out;
+                      write_block (pvmd->file, (char __user *) buf, m,
+                                   offset);
+                      vunmap (buf);
+                      spin_lock_irq (&mapping->private_lock);
+                      for (k = 0; k < m; ++k)
+                        {
+                          unlock_page (p[start + k]);
+                          radix_tree_tag_clear (&mapping->i_pages,
+                                                page_index (p[start + k]),
+                                                PAGECACHE_TAG_DIRTY);
+                        }
+                      spin_unlock_irq (&mapping->private_lock);
+                    }
                   start = j + 1;
-               }
+                }
             }
         }
       m = (int) (p[j]->index - p[start]->index + 1);
@@ -889,7 +676,7 @@ pvshm_writepages (struct address_space *mapping,
       if (verbose)
         printk ("pvshm_writepages start=%ld end=%ld\n", p[start]->index,
                 p[j]->index);
-      offset = p[start]->index << PAGE_CACHE_SHIFT;
+      offset = p[start]->index << PAGE_SHIFT;
       for (k = 0; k < m; ++k)
         {
           lock_page (p[start + k]);
@@ -900,31 +687,30 @@ pvshm_writepages (struct address_space *mapping,
         goto out;
       write_block (pvmd->file, (char __user *) buf, m, offset);
       vunmap (buf);
-      spin_lock_irq (&mapping->tree_lock);
+      spin_lock_irq (&mapping->private_lock);
       for (k = 0; k < m; ++k)
         {
           unlock_page (p[start + k]);
-          radix_tree_tag_clear (&mapping->page_tree,
+          radix_tree_tag_clear (&mapping->i_pages,
                                 page_index (p[start + k]),
                                 PAGECACHE_TAG_DIRTY);
         }
-      spin_unlock_irq (&mapping->tree_lock);
-      if(wbc->nr_to_write) wbc->nr_to_write -= m;
-      if(wbc->sync_mode == WB_SYNC_NONE) {
+      spin_unlock_irq (&mapping->private_lock);
+      if (wbc->nr_to_write)
+        wbc->nr_to_write -= m;
+      if (wbc->sync_mode == WB_SYNC_NONE)
+        {
 // Called for memory cleansing
-        invalidate_inode_pages2_range(inode->i_mapping,
-                                      p[start]->index,
-                                      p[j]->index);
-      }
+          invalidate_inode_pages2_range (inode->i_mapping,
+                                         p[start]->index, p[j]->index);
+        }
     }
 out:
   kfree (p);
-out1:
 /* Write out any remaining pages */
   return generic_writepages (mapping, wbc);
 }
 
-/* read ahead. */
 static int
 pvshm_readpages (struct file *file, struct address_space *mapping,
                  struct list_head *pages, unsigned nr_pages)
@@ -946,7 +732,7 @@ pvshm_readpages (struct file *file, struct address_space *mapping,
   if (verbose)
     printk ("pvshm_readpages %d\n", (int) nr_pages);
   n = pg->index;
-  offset = n << PAGE_CACHE_SHIFT;
+  offset = n << PAGE_SHIFT;
   list_for_each_entry_reverse (pg, pages, lru)
   {
     if (n == pg->index)
@@ -971,7 +757,7 @@ pvshm_readpages (struct file *file, struct address_space *mapping,
 /* Read the contiguous block at once */
   old_fs = get_fs ();
   set_fs (get_ds ());
-  res = vfs_read (pvmd->file, (char __user *) buf, m * PAGE_SIZE, &offset);
+  res = kernel_read (pvmd->file, (char __user *) buf, m * PAGE_SIZE, &offset);
   set_fs (old_fs);
   if (verbose)
     printk ("pvshm_readpages bytes read = %ld\n", (long) res);
@@ -1001,7 +787,7 @@ pvshm_readpages (struct file *file, struct address_space *mapping,
           else
             mapping->a_ops->readpage (file, pg);
         }
-      page_cache_release (pg);
+      put_page (pg);
     }
   vunmap (buf);
   kfree (pg_array);
@@ -1029,7 +815,7 @@ pvshm_readpage (struct file *file, struct page *page)
   if (page_addr)
     {
       j = 0;
-      offset = page->index << PAGE_CACHE_SHIFT;
+      offset = page->index << PAGE_SHIFT;
       if (verbose)
         printk ("pvshm_readpage offset=%ld, page_addr=%p\n", (long) offset,
                 page_addr);
@@ -1038,20 +824,9 @@ pvshm_readpage (struct file *file, struct page *page)
           old_fs = get_fs ();
           set_fs (KERNEL_DS);
           j =
-            vfs_read (pvmd->file, (char __user *) page_addr, PAGE_SIZE,
-                      &offset);
+            kernel_read (pvmd->file, (char __user *) page_addr, PAGE_SIZE,
+                         &offset);
           set_fs (old_fs);
-        }
-      if (pvmd->multiwrite && !page_has_private (page))
-        {
-/* XXX multiwrite */
-          void *twin;
-          pgoff_t index;
-          index = page->index;
-          twin = (void *) kmalloc (PAGE_SIZE, 0);
-          copy_page (twin, page_addr);
-          SetPagePrivate (page);
-          set_page_private (page, (unsigned long) twin);
         }
       if (verbose)
         printk ("readpage %d bytes at index %d complete\n", j,
@@ -1068,23 +843,13 @@ pvshm_readpage (struct file *file, struct page *page)
   return 0;
 }
 
+
 static int __init
 init_pvshm_fs (void)
 {
   int j;
-  pvshm_backing_dev_info.ra_pages = (unsigned long) read_ahead;
-  j = bdi_setup_and_register (&pvshm_backing_dev_info, "pvshm");
-  if (j)
-    {
-      printk ("pvshm ERROR initializing bdi\n");
-      return (j);
-    }
   j = register_filesystem (&pvshm_fs_type);
-  if (j)
-    bdi_destroy (&pvshm_backing_dev_info);
-  else
-    printk ("pvshm module loaded, ra_pages = %d.\n",
-            (int) pvshm_backing_dev_info.ra_pages);
+  printk ("pvshm module loaded\n");
   return j;
 }
 
@@ -1092,9 +857,6 @@ static void __exit
 exit_pvshm_fs (void)
 {
   printk ("pvshm module unloaded.\n");
-  if (verbose)
-    printk ("\n\n\n");
-//  bdi_unregister (&pvshm_backing_dev_info); XXX removed
   unregister_filesystem (&pvshm_fs_type);
 }
 

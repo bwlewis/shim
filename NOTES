@@ -1,36 +1,13 @@
----
-Now supporting read ahead via readpages, but this is experimental. There is
-a new kernel parameter 'read_ahead' that defaults to zero. Use it to set
-the number of read ahead pages.
----
-Multiple writer support with finer than page granularity is now supported. We
-refer to this option as "multiwrite" mode.  Multiwrite mode is available on a
-per-file/per-kernel basis--that is, a file may be enabled for multiwrite mode
-on a per-computer basis across computers participating in a parallel file
-system. Multiwrite mode is toggled by issuing a write operation to a pvshm file
-with a NULL (0) buffer. This is something of a hack and may change in the near
-future. Once enabled, processes may write to non-overlapping bytes in a file
-without interference. Multiwrite mode is disabled by default. When enabled, it
-incurs a memory penalty because a difference must be computed between original
-and modified pagecache pages. Note that multiwrite mode is independent of cache
-consistency.
+Linux kernel version used for development/testing: 4.17.11.
+See git branches for other kernel versions.
 
-Pages already in the pagecache when multiwrite mode is enabled will not be
-affected. Unless multiwrite mode is enabled right after linking and mapping the
-file, it's a good idea to first reverse msync any desired pages or flush the
-entire page cache.  In light of this, and since multiwrite affects all the
-processes accessing a file per kernel, their activity should be coordinated.
+---
+There is a new kernel parameter 'read_ahead' that defaults to 1024 pages. Use
+it to set the number of read ahead pages.
 ---
 Basic pass-through read and write operations are now supported. AIO and iovec
 are not supported.
 ---
-The pvshm module requires a recent (ca 2.6.31) vanilla Linux kernel. We include
-a hack to support older RHEL kernels used by Amazon EC2 (< 2.6.27), but use
-with Linux kernel versions prior to 2.6.31 at your own risk.  Pvshm is known to
-crash on x86_64 2.6.28x kernels used in Ubuntu 9.04, don't use it on that OS.
-It's tested working on x86 and x86_64 2.6.31x kernels used in Ubuntu 9.10 and
-on x86_64 2.6.32x kernels used in Ubuntu 10.04.
-
 The module opens the backing file for read/write as soon as a link is created.
 
 Error checking and some important features are inadequate, but improving. In
@@ -40,10 +17,6 @@ particular:
 
 Moral? Don't use this on a machine that you value. It will crash.
 
-UML hostfs is very similar to this.
-FUSE shared-writable mmap is similar to this (if it really exists?).
-
-Manual cache control:
 Issue an lseek/read with a null buffer to update the page cache from the
 backing file (reverse msync).
 
