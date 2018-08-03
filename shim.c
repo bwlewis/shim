@@ -75,7 +75,7 @@ write_block (struct file *file, char __user * buf, int m, loff_t offset)
 const struct inode_operations shim_dir_inode_operations;
 const struct inode_operations shim_file_inode_operations;
 struct dentry *shim_get_sb (struct file_system_type *fs_type,
-                             int flags, const char *dev_name, void *data);
+                            int flags, const char *dev_name, void *data);
 struct inode *shim_iget (struct super_block *sp, unsigned long ino);
 int shim_setattr (struct dentry *dentry, struct iattr *iattr);
 
@@ -83,13 +83,13 @@ int shim_setattr (struct dentry *dentry, struct iattr *iattr);
 static int shim_writepage (struct page *page, struct writeback_control *wbc);
 static int shim_readpage (struct file *file, struct page *page);
 static int shim_readpages (struct file *file, struct address_space *mapping,
-                            struct list_head *page_list, unsigned nr_pages);
+                           struct list_head *page_list, unsigned nr_pages);
 static int shim_writepages (struct address_space *mapping,
-                             struct writeback_control *wbc);
+                            struct writeback_control *wbc);
 static int shim_set_page_dirty_nobuffers (struct page *page);
 static int shim_releasepage (struct page *page, gfp_t gfp_flags);
 static void shim_invalidatepage (struct page *page, unsigned int offset,
-                                  unsigned int length);
+                                 unsigned int length);
 
 /* File operations */
 static int shim_file_mmap (struct file *, struct vm_area_struct *);
@@ -172,7 +172,8 @@ shim_file_read_iter (struct kiocb * iocb, struct iov_iter * iter)
   int i;
 
   size_t count = iov_iter_count (iter);
-  printk ("shim_file_read_iter %d\n", (int) count);
+  if (verbose)
+    printk ("shim_file_read_iter %d\n", (int) count);
   if (iter->iov->iov_base)
     return generic_file_read_iter (iocb, iter);
 
@@ -212,7 +213,7 @@ shim_file_read_iter (struct kiocb * iocb, struct iov_iter * iter)
  */
 ssize_t
 shim_write (struct file * filp, const char __user * buf, size_t len,
-             loff_t * skip)
+            loff_t * skip)
 {
   mm_segment_t old_fs;
   ssize_t ret = -EBADF;
@@ -301,8 +302,7 @@ shim_get_inode (struct super_block *sb, umode_t mode, dev_t dev)
 }
 
 static int
-shim_mknod (struct inode *dir, struct dentry *dentry, umode_t mode,
-             dev_t dev)
+shim_mknod (struct inode *dir, struct dentry *dentry, umode_t mode, dev_t dev)
 {
   int error = -ENOSPC;
   struct inode *inode = shim_get_inode (dir->i_sb, mode, dev);
@@ -336,7 +336,7 @@ shim_mkdir (struct inode *dir, struct dentry *dentry, umode_t mode)
 
 static int
 shim_create (struct inode *dir, struct dentry *dentry, umode_t mode,
-              bool exclusive)
+             bool exclusive)
 {
   return shim_mknod (dir, dentry, mode | S_IFREG, 0);
 }
@@ -493,7 +493,7 @@ shim_fill_super (struct super_block *sb, void *data, int silent)
 
 struct dentry *
 shim_get_sb (struct file_system_type *fs_type,
-              int flags, const char *dev_name, void *data)
+             int flags, const char *dev_name, void *data)
 {
   return mount_nodev (fs_type, flags, data, shim_fill_super);
 }
@@ -518,20 +518,16 @@ static int
 shim_releasepage (struct page *page, gfp_t gfp_flags)
 {
   if (verbose)
-    {
-      printk ("shim_releasepage private = %d\n", PagePrivate (page));
-    }
+    printk ("shim_releasepage private = %d\n", PagePrivate (page));
   return 0;
 }
 
 static void
 shim_invalidatepage (struct page *page, unsigned int offset,
-                      unsigned int length)
+                     unsigned int length)
 {
   if (verbose)
-    {
-      printk ("shim_invalidatepage private = %d\n", PagePrivate (page));
-    }
+    printk ("shim_invalidatepage private = %d\n", PagePrivate (page));
   shim_releasepage (page, 0);
 }
 
@@ -585,11 +581,8 @@ shim_writepage (struct page *page, struct writeback_control *wbc)
 
   wbc->nr_to_write -= 1;
   if (wbc->sync_mode == WB_SYNC_NONE)
-    {
-// Called for memory cleansing
-      invalidate_inode_pages2_range (inode->i_mapping,
-                                     page->index, page->index);
-    }
+    invalidate_inode_pages2_range (inode->i_mapping,
+                                   page->index, page->index);
 
   return 0;
 }
@@ -599,8 +592,7 @@ shim_writepage (struct page *page, struct writeback_control *wbc)
  * to be the same as read_ahead.
  */
 static int
-shim_writepages (struct address_space *mapping,
-                  struct writeback_control *wbc)
+shim_writepages (struct address_space *mapping, struct writeback_control *wbc)
 {
   pgoff_t index;
   pgoff_t end;
@@ -713,7 +705,7 @@ out:
 
 static int
 shim_readpages (struct file *file, struct address_space *mapping,
-                 struct list_head *pages, unsigned nr_pages)
+                struct list_head *pages, unsigned nr_pages)
 {
   unsigned page_idx;
   void *page_addr;
