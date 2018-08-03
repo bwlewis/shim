@@ -1,21 +1,21 @@
-THE PVSHM FILE SYSTEM
+THE SHIM FILE SYSTEM
 
 Warning
 
-Pvshm is a very experimental Linux kernel module. And it breaks several
+Shim is a very experimental Linux kernel module. And it breaks several
 conventions. Don't use it on production machines. It can crash your system!
 
 Rationale
 
-The pvshm module defines an overlay file system for the Linux kernel that sits
-between applications and an underlying file system. The pvshm module implements
-address space operations on its files as read and write operations on
-corresponding backing files in the underlying file system. Pvshm is designed to
-provide file memory mapping capability for file systems that do not natively
-support memory mapping. In particular, we wrote pvshm to allow us to memory map
-files on a pvfs2 file system without modifying pvfs2 itself.
+The shim module defines an intermediary file system for the Linux kernel that
+sits between applications and an underlying file system. The shim module
+implements address space operations on its files as read and write operations
+on corresponding backing files in the underlying file system. Shim is designed
+to provide read/write memory mapping capability for file systems that do not
+natively support memory mapping. In particular, we wrote shim to allow us to
+memory map files on a pvfs2 file system without modifying pvfs2 itself.
  
-Pvshm does not enforce cache consistency between processes accessing the same
+Shim does not enforce cache consistency between processes accessing the same
 file. Instead, we leave the management of cache consistency up to the
 applications by providing user space functions for cache updates after write
 operations (a traditional msync function), and before read operations (a kind
@@ -24,18 +24,18 @@ of reverse msync).
 
 Design
 
-Loading the pvshm.ko module enables support for the file system. Pvshm
+Loading the shim.ko module enables support for the file system. Shim
 does not use a backing device and is mounted similarly to ramfs and tmpfs
 file systems.
 
-Symbolic links are a special operation for pvshm. One uses a symbolic link to
-set up a 'shadow' file in pvshm. Address space operations on the link are
+Symbolic links are a special operation for shim. One uses a symbolic link to
+set up a 'shadow' file in shim. Address space operations on the link are
 implemented as read or write operations on the backing file. We chose this
-unconvention to make pvshm easy to use with existing tools. When a link
+unconvention to make shim easy to use with existing tools. When a link
 is created, the backing file is opened for reading and writing by the module.
 
 Deleting a symbolic link closes the open file descriptor to the backing file
-and de-allocates data structures used by pvshm internally.  Although memory
+and de-allocates data structures used by shim internally.  Although memory
 mapping is the main design objective, basic read and write file operations are
 supported for convenience.
 
@@ -45,14 +45,14 @@ Future versions will include byte-addressible backing file updates.
 
 Cache consistency
 
-Pvshm does not enforce cache consistency between multiple processes mapping the
+Shim does not enforce cache consistency between multiple processes mapping the
 same file.
 
 The standard msync call is implemented. When called by a process, mysnc causes
 cached pages that have been flagged as changed to be written back to the
 backing file.
 
-Pvshm provides a function to explicitly refresh the page cache with data from
+Shim provides a function to explicitly refresh the page cache with data from
 the backing file, replacing any data already in the cache (sort of a reverse
 msync). This function is implemented using a variation of the standard read
 function. Using read allows us to provide this functionality to applications
@@ -67,7 +67,7 @@ backing file. Consider the following standard read example:
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-int fd = open("/path/to/pvshm/file", O_RDWR);
+int fd = open("/path/to/shim/file", O_RDWR);
 size_t count = 555;
 void *buf = (void *)malloc(count);
 lseek(fd, 5000, SEEK_SET);
@@ -96,15 +96,15 @@ consensus algorithm for consistency across distributed applications.
 Example
 
 # This example creats a one megabyte backing file on the current file system,
-# installs the pvshm module and creates a shadow file suitable for memory
-# mapping in the pvshm file system.
+# installs the shim module and creates a shadow file suitable for memory
+# mapping in the shim file system.
 
 dd if=/dev/zero of=backing_file bs=1M count=1
-insmod pvshm.ko
-mount -t pvshm none /mnt
+insmod shim.ko
+mount -t shim none /mnt
 ln -s backing_file /mnt
 
 # (you can now memory map /mnt/backing_file)
 
 umount /mnt
-rmmod pvshm
+rmmod shim

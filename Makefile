@@ -1,5 +1,5 @@
 ifneq (${KERNELRELEASE},)
-obj-m += pvshm.o
+obj-m += shim.o
 else
 KERNEL_SOURCE := /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
