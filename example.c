@@ -22,7 +22,11 @@ main (int argc, char **argv)
       return -1;
     }
   fd = open (argv[1], O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
-  if (fd < 0) return fd;
+  if (fd < 0)
+    {
+      printf ("open error %d\n", fd);
+      return fd;
+    }
   fstat (fd, &sbuffer);
   n = sbuffer.st_size / 4096;
   printf("reading %d pages from %d\n",n,fd);
@@ -45,7 +49,10 @@ main (int argc, char **argv)
   printf("%d\n", fsync(fd));
   printf("%d\n", fdatasync(fd));
   munmap((void *)A, sbuffer.st_size);
+
   write(fd, "silly", 5);
+  lseek(fd, 0, SEEK_SET);
+  read(fd, NULL, 4096);
   close(fd);
   free(B);
   return 0;

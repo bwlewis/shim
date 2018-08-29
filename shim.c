@@ -77,7 +77,6 @@ const struct inode_operations shim_file_inode_operations;
 struct dentry *shim_get_sb (struct file_system_type *fs_type,
                             int flags, const char *dev_name, void *data);
 struct inode *shim_iget (struct super_block *sp, unsigned long ino);
-int shim_setattr (struct dentry *dentry, struct iattr *iattr);
 
 /* Address space operations */
 static int shim_writepage (struct page *page, struct writeback_control *wbc);
@@ -95,7 +94,6 @@ static void shim_invalidatepage (struct page *page, unsigned int offset,
 static int shim_file_mmap (struct file *, struct vm_area_struct *);
 static int shim_sync_file (struct file *, loff_t, loff_t, int);
 ssize_t shim_write (struct file *, const char __user *, size_t, loff_t *);
-ssize_t shim_read (struct file *, char __user *, size_t, loff_t *);
 ssize_t shim_file_read_iter (struct kiocb *, struct iov_iter *);
 
 /*
@@ -130,6 +128,7 @@ const struct file_operations shim_file_operations = {
   .fsync = shim_sync_file,
   .llseek = generic_file_llseek,
   .read_iter = shim_file_read_iter,
+  .open = simple_open,
   .write = shim_write,
   .llseek = generic_file_llseek,
   .splice_read = generic_file_splice_read,
@@ -170,16 +169,24 @@ shim_file_read_iter (struct kiocb * iocb, struct iov_iter * iter)
   pgoff_t pstart, pend;
   struct pagevec pvec;
   int i;
-
+  shim_target *pvmd;
   size_t count = iov_iter_count (iter);
   if (verbose)
-    printk ("shim_file_read_iter %d\n", (int) count);
-  if (iter->iov->iov_base)
-    return generic_file_read_iter (iocb, iter);
+    printk (KERN_DEBUG "shim_file_read_iter %d\n", (int) count);
 
   file = iocb->ki_filp;
   mapping = file->f_mapping;
   inode = mapping->host;
+  pvmd = (shim_target *) inode->i_private;
+  if (!pvmd)
+    {
+      printk (KERN_WARNING "shim_file_read_iter missing target file\n");
+      return -1;
+    }
+
+  if (iter->iov->iov_base)
+    return generic_file_read_iter (iocb, iter);
+
   pstart = iocb->ki_pos >> PAGE_SHIFT;
   pend = ((iocb->ki_pos + count + PAGE_SIZE - 1) >> PAGE_SHIFT);
 // XXX add page index range check
@@ -195,7 +202,7 @@ shim_file_read_iter (struct kiocb * iocb, struct iov_iter * iter)
       index = page->index;
       ClearPageUptodate (page);
       if (verbose)
-        printk ("reverse sync: page->index=%d %s %s\n",
+        printk (KERN_DEBUG "reverse sync: page->index=%d %s %s\n",
                 (int) page->index,
                 PageUptodate (page) ? "Uptodate" :
                 "Not Uptodate", PageLocked (page) ? "Locked" : "Unlocked");
@@ -210,6 +217,12 @@ shim_file_read_iter (struct kiocb * iocb, struct iov_iter * iter)
 /* shim_write
  *
  * The shim_write function passes usual write operations to the backing file.
+ * XXX
+ * XXX This may not make any sense. Instead:
+ * 1. release any open target file descriptor
+ * 2. pass write through to target file
+ * 3. re-open target file descriptor (as in symlink)
+  
  */
 ssize_t
 shim_write (struct file * filp, const char __user * buf, size_t len,
@@ -228,11 +241,12 @@ shim_write (struct file * filp, const char __user * buf, size_t len,
       ret = kernel_write (pvmd->file, (char __user *) buf, len, skip);
       set_fs (old_fs);
       if (verbose)
-        printk ("shim_write to backing file %s\n", pvmd->path);
+        printk (KERN_INFO "shim_write to backing file %s\n", pvmd->path);
     }
 out:
   return ret;
 }
+
 
 static int
 shim_file_mmap (struct file *f, struct vm_area_struct *v)
@@ -242,7 +256,7 @@ shim_file_mmap (struct file *f, struct vm_area_struct *v)
   if (!pvmd)
     goto out;
   if (verbose)
-    printk ("shim_file_mmap %s\n", pvmd->path);
+    printk (KERN_INFO "shim_file_mmap %s\n", pvmd->path);
   ret = generic_file_mmap (f, v);
 out:
   return ret;
@@ -259,7 +273,7 @@ shim_sync_file (struct file *f, loff_t start, loff_t end, int k)
   if (!pv_tgt)
     goto out;
   if (verbose)
-    printk ("shim_sync_file %s k=%d\n", pv_tgt->path, k);
+    printk (KERN_INFO "shim_sync_file %s k=%d\n", pv_tgt->path, k);
   j = filemap_write_and_wait (f->f_mapping);
 out:
   return j;
@@ -274,6 +288,8 @@ shim_get_inode (struct super_block *sb, umode_t mode, dev_t dev)
   if (inode)
     {
       inode->i_mode = mode;
+      inode->i_uid = current_uid ();
+      inode->i_gid = current_gid ();
       inode->i_blocks = 0;
       inode->i_mapping->a_ops = &shim_aops;
       inode->i_atime = inode->i_mtime = inode->i_ctime =
@@ -301,13 +317,14 @@ shim_get_inode (struct super_block *sb, umode_t mode, dev_t dev)
   return inode;
 }
 
+/* Patterned after ramfs */
 static int
 shim_mknod (struct inode *dir, struct dentry *dentry, umode_t mode, dev_t dev)
 {
   int error = -ENOSPC;
   struct inode *inode = shim_get_inode (dir->i_sb, mode, dev);
   if (verbose)
-    printk ("shim_mknod d_name=%s\n", dentry->d_name.name);
+    printk (KERN_INFO "shim_mknod d_name=%s\n", dentry->d_name.name);
 
   if (inode)
     {
@@ -353,7 +370,7 @@ shim_unlink (struct inode *dir, struct dentry *d)
   if (pvmd)
     {
       if (verbose)
-        printk ("shim_unlink %s\n", pvmd->path);
+        printk (KERN_INFO "shim_unlink %s\n", pvmd->path);
       if (pvmd->file)
         filp_close (pvmd->file, current->files);
       kfree (pvmd->path);
@@ -363,7 +380,7 @@ shim_unlink (struct inode *dir, struct dentry *d)
 }
 
 /* Create a shim entry and set up a mapping between the shim file 
- * and the target file in specified by symname.
+ * and the target file specified by symname.
  * 
  * Open a r/w file stream to the target.
  */
@@ -383,7 +400,15 @@ shim_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
   if (error)
     {
       if (verbose)
-        printk ("shim_symlink can't stat target file\n");
+        printk (KERN_WARNING "shim_symlink can't stat target file\n");
+      kfree (pvmd);
+      goto end;
+    }
+  if ((stat.mode & S_IFMT) == S_IFDIR)
+    {
+      if (verbose)
+        printk (KERN_WARNING
+                "shim_symlink only works with files (not directories)\n");
       kfree (pvmd);
       goto end;
     }
@@ -396,7 +421,7 @@ shim_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
   inode->i_fop = &shim_file_operations;
   inode->i_mapping->a_ops = &shim_aops;
   if (verbose)
-    printk ("shim_symlink d_name=%s, symname=%s\n",
+    printk (KERN_INFO "shim_symlink d_name=%s, symname=%s\n",
             dentry->d_name.name, symname);
   if (inode)
     {
@@ -409,12 +434,16 @@ shim_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
       error = 0;
       pvmd->path = (char *) kmalloc (l, 0);
       memcpy (pvmd->path, symname, l);
-      pvmd->file = filp_open (symname, O_RDWR | O_LARGEFILE, 0644);
+      pvmd->file = filp_open (symname, O_RDWR | O_LARGEFILE, 0);
       if (!pvmd->file)
         {
           error = -EBADF;
           if (verbose)
-            printk ("shim_symlink symname=%s fget error\n", symname);
+            printk (KERN_INFO "shim_symlink symname=%s unable to open\n",
+                    symname);
+          kfree(pvmd->path);
+          kfree (pvmd);
+          pvmd = NULL;
         }
 
       inode->i_private = pvmd;
@@ -445,7 +474,7 @@ const struct inode_operations shim_dir_inode_operations = {
   .mknod = shim_mknod,
   .rename = simple_rename,
   .lookup = simple_lookup,
-//  .setattr = shim_setattr,
+  .setattr = simple_setattr,
 };
 
 static struct file_system_type shim_fs_type = {
@@ -463,7 +492,7 @@ shim_fill_super (struct super_block *sb, void *data, int silent)
   int j;
 
   if (verbose)
-    printk ("shim_fill_super\n");
+    printk (KERN_INFO "shim_fill_super\n");
   sb->s_maxbytes = MAX_LFS_FILESIZE;
   sb->s_blocksize = PAGE_SIZE;
   sb->s_blocksize_bits = PAGE_SHIFT;
@@ -476,7 +505,7 @@ shim_fill_super (struct super_block *sb, void *data, int silent)
     return j;
   sb->s_bdi->ra_pages = read_ahead;
   if (verbose)
-    printk ("sb->s_bdi->ra_pages = %u\n", read_ahead);
+    printk (KERN_INFO "sb->s_bdi->ra_pages = %u\n", read_ahead);
   shim_root_inode = shim_get_inode (sb, S_IFDIR | 0755, 0);
   if (!shim_root_inode)
     return -ENOMEM;
@@ -504,7 +533,7 @@ shim_set_page_dirty_nobuffers (struct page *page)
   int j = 0;
   j = __set_page_dirty_nobuffers (page);
   if (verbose)
-    printk ("shim_spdirty_nb: %d [%s] [%s] [%s] [%s]\n",
+    printk (KERN_INFO "shim_spdirty_nb: %d [%s] [%s] [%s] [%s]\n",
             (int) page->index,
             PageUptodate (page) ? "Uptodate" : "Not Uptodate",
             PageDirty (page) ? "Dirty" : "Not Dirty",
@@ -518,7 +547,7 @@ static int
 shim_releasepage (struct page *page, gfp_t gfp_flags)
 {
   if (verbose)
-    printk ("shim_releasepage private = %d\n", PagePrivate (page));
+    printk (KERN_INFO "shim_releasepage private = %d\n", PagePrivate (page));
   return 0;
 }
 
@@ -527,7 +556,8 @@ shim_invalidatepage (struct page *page, unsigned int offset,
                      unsigned int length)
 {
   if (verbose)
-    printk ("shim_invalidatepage private = %d\n", PagePrivate (page));
+    printk (KERN_INFO "shim_invalidatepage private = %d\n",
+            PagePrivate (page));
   shim_releasepage (page, 0);
 }
 
@@ -571,7 +601,8 @@ shim_writepage (struct page *page, struct writeback_control *wbc)
 
   if (verbose)
     printk
-      ("shim_writepage: %d link=%s [%s] [%s] [%s] [%s] count %d nr_to_write %ld\n",
+      (KERN_INFO
+       "shim_writepage: %d link=%s [%s] [%s] [%s] [%s] count %d nr_to_write %ld\n",
        (int) page->index, (char *) pvmd->path,
        PageUptodate (page) ? "Uptodate" : "Not Uptodate",
        PageDirty (page) ? "Dirty" : "Not Dirty",
@@ -620,7 +651,8 @@ shim_writepages (struct address_space *mapping, struct writeback_control *wbc)
       if (n == 0)
         break;
       if (verbose)
-        printk ("shim_writepages ndirty=%d index=%ld nr_to_write=%ld\n", n,
+        printk (KERN_INFO
+                "shim_writepages ndirty=%d index=%ld nr_to_write=%ld\n", n,
                 index, wbc->nr_to_write);
 /* Search the array of dirty pages for contiguous blocks */
       if (n > 1)
@@ -634,7 +666,8 @@ shim_writepages (struct address_space *mapping, struct writeback_control *wbc)
                   if (m > 1)
                     {
                       if (verbose)
-                        printk ("shim_writepages start=%ld end=%ld\n",
+                        printk (KERN_INFO
+                                "shim_writepages start=%ld end=%ld\n",
                                 p[start]->index, p[j]->index);
                       offset = p[start]->index << PAGE_SHIFT;
                       for (k = 0; k < m; ++k)
@@ -666,8 +699,8 @@ shim_writepages (struct address_space *mapping, struct writeback_control *wbc)
       if (m < 2)
         goto out;
       if (verbose)
-        printk ("shim_writepages start=%ld end=%ld\n", p[start]->index,
-                p[j]->index);
+        printk (KERN_INFO "shim_writepages start=%ld end=%ld\n",
+                p[start]->index, p[j]->index);
       offset = p[start]->index << PAGE_SHIFT;
       for (k = 0; k < m; ++k)
         {
@@ -718,11 +751,18 @@ shim_readpages (struct file *file, struct address_space *mapping,
   struct inode *inode = file->f_mapping->host;
   shim_target *pvmd = (shim_target *) inode->i_private;
   unsigned int n = 0, m = 0;
-  struct page **pg_array = kmalloc (sizeof (pg) * nr_pages, GFP_NOFS);
+  struct page **pg_array;
+
+  if ((!pvmd) || (!pvmd->file))
+    {
+      printk (KERN_WARNING "shim_readpages no backing file\n");
+      return -1;
+    }
+  pg_array = kmalloc (sizeof (pg) * nr_pages, GFP_NOFS);
   if (!pg_array)
     return -ENOMEM;
   if (verbose)
-    printk ("shim_readpages %d\n", (int) nr_pages);
+    printk (KERN_INFO "shim_readpages %d\n", (int) nr_pages);
   n = pg->index;
   offset = n << PAGE_SHIFT;
   list_for_each_entry_reverse (pg, pages, lru)
@@ -745,14 +785,14 @@ shim_readpages (struct file *file, struct address_space *mapping,
     }
   p = buf;
   if (verbose)
-    printk ("shim_readpages contiguous = %ld\n", (long) m);
+    printk (KERN_INFO "shim_readpages contiguous = %ld\n", (long) m);
 /* Read the contiguous block at once */
   old_fs = get_fs ();
   set_fs (get_ds ());
   res = kernel_read (pvmd->file, (char __user *) buf, m * PAGE_SIZE, &offset);
   set_fs (old_fs);
   if (verbose)
-    printk ("shim_readpages bytes read = %ld\n", (long) res);
+    printk (KERN_INFO "shim_readpages bytes read = %ld\n", (long) res);
 /* Copy buffer into pages and read any remaning pages after the block one
  * by one.
  */
@@ -767,7 +807,8 @@ shim_readpages (struct file *file, struct address_space *mapping,
               page_addr = kmap (pg);
               if (verbose)
                 printk
-                  ("Copying to page addr %p index %ld from buffer addr %p\n",
+                  (KERN_INFO
+                   "Copying to page addr %p index %ld from buffer addr %p\n",
                    page_addr, pg->index, p);
               copy_page (page_addr, p);
               p += PAGE_SIZE;
@@ -796,7 +837,7 @@ shim_readpage (struct file *file, struct page *page)
   struct inode *inode = file->f_mapping->host;
   shim_target *pvmd = (shim_target *) inode->i_private;
   if (verbose)
-    printk ("shim_readpage %d %s %ld [%s] [%s] [%s]\n",
+    printk (KERN_INFO "shim_readpage %d %s %ld [%s] [%s] [%s]\n",
             (int) page->index,
             (char *) pvmd->path,
             page->mapping->nrpages,
@@ -809,8 +850,8 @@ shim_readpage (struct file *file, struct page *page)
       j = 0;
       offset = page->index << PAGE_SHIFT;
       if (verbose)
-        printk ("shim_readpage offset=%ld, page_addr=%p\n", (long) offset,
-                page_addr);
+        printk (KERN_INFO "shim_readpage offset=%ld, page_addr=%p\n",
+                (long) offset, page_addr);
       if (pvmd->file)
         {
           old_fs = get_fs ();
@@ -821,7 +862,7 @@ shim_readpage (struct file *file, struct page *page)
           set_fs (old_fs);
         }
       if (verbose)
-        printk ("readpage %d bytes at index %d complete\n", j,
+        printk (KERN_INFO "readpage %d bytes at index %d complete\n", j,
                 (int) page->index);
 /* XXX It may be that the backing file is not a multiple of the page size,
  * resulting in j < PAGE_SIZE. We should probably clear the remainder of
@@ -841,14 +882,14 @@ init_shim_fs (void)
 {
   int j;
   j = register_filesystem (&shim_fs_type);
-  printk ("shim module loaded\n");
+  printk (KERN_INFO "shim module loaded\n");
   return j;
 }
 
 static void __exit
 exit_shim_fs (void)
 {
-  printk ("shim module unloaded.\n");
+  printk (KERN_INFO "shim module unloaded.\n");
   unregister_filesystem (&shim_fs_type);
 }
 

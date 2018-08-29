@@ -5,8 +5,8 @@ See git branches for other kernel versions.
 There is a new kernel parameter 'read_ahead' that defaults to 1024 pages. Use
 it to set the number of read ahead pages.
 ---
-Basic pass-through read and write operations are now supported. AIO and iovec
-are not supported.
+Basic pass-through read and write operations are now supported, but bugs below.
+AIO and iovec are not supported.
 ---
 The module opens the backing file for read/write as soon as a link is created.
 
@@ -22,3 +22,26 @@ backing file (reverse msync).
 
 Use the standard msync system call to force writeback of dirty pages
 in the page cache to the backing file.
+
+------------- other bugs and problems -----------------
+
+shim_write (pass-through write to backing file) doesn't make sense and probably
+doesn't work...  for instance, what if the file size changes?
+
+shim_create/shim_mkdir/shim_mknod not working and crashes.
+How to handle file creation (without link)?
+what about directories?
+what about file delete (not unlink)???
+
+Overall, how should file creation, write, truncate, etc. be handled in shim? It
+*would* be nice to support this within shim, somehow, for use with exm.  ???
+
+Many set attribute settings result in crashes. Fix.
+
+shim_read is unused, other file operations incomplete
+
+
+linking read-only file works, but readpages crashes. ??
+
+filp_open seems to open read-only files with O_RDWR flag without error?
+
