@@ -1,3 +1,5 @@
+Don't use this on a machine that you value. It will crash.
+
 Linux kernel version used for development/testing: 4.17.11.
 See git branches for other kernel versions.
 
@@ -10,22 +12,24 @@ Adding an experimental mount -o option, where option is a default path to create
 files. This will buy some time with the link approach. We can, at mount time,
 specify where to populate links. This is very preliminary...
 
+Right now the default path is /tmp if no option is specified.
+
 
 ---
-There is a new kernel parameter 'read_ahead' that defaults to 1024 pages. Use
+The module parameter 'read_ahead' that defaults to 1024 pages. Use
 it to set the number of read ahead pages.
 ---
 Basic pass-through read and write operations are now supported, but bugs below.
 AIO and iovec are not supported.
 ---
+Pipes, unix sockets, etc. are not supported, but also not tested against and
+might crash things if attempted. XXX
+---
 The module opens the backing file for read/write as soon as a link is created.
 
-Error checking and some important features are inadequate, but improving. In
-particular:
+---
+Memory mappings must not exceed backing file size. (this should be fixed)
 
-  - Memory mappings must not exceed backing file size. (this should be fixed)
-
-Moral? Don't use this on a machine that you value. It will crash.
 
 Issue an lseek/read with a null buffer to update the page cache from the
 backing file (reverse msync).
