@@ -104,7 +104,6 @@ ssize_t shim_file_read_iter (struct kiocb *, struct iov_iter *);
 typedef struct
 {
   char *path;
-  loff_t max_size;
   struct file *file;
 } shim_target;
 
@@ -180,7 +179,7 @@ shim_file_read_iter (struct kiocb * iocb, struct iov_iter * iter)
   pvmd = (shim_target *) inode->i_private;
   if (!pvmd)
     {
-      printk (KERN_WARNING "shim_file_read_iter missing target file\n");
+      printk (KERN_WARNING "shim_file_read_iter missing backing file\n");
       return -1;
     }
 
@@ -216,28 +215,49 @@ shim_file_read_iter (struct kiocb * iocb, struct iov_iter * iter)
 
 /* shim_write
  *
- * The shim_write function passes usual write operations to the backing file.
- * XXX
- * XXX This may not make any sense.
+ * The shim_write function passes usual write operation to
+ * the backing file, adjusting the inode size of both the backing and
+ * the shim entries.
  */
 ssize_t
 shim_write (struct file * filp, const char __user * buf, size_t len,
             loff_t * skip)
 {
+  struct dentry *backing_dentry;
+  struct dentry *shim_dentry;
   mm_segment_t old_fs;
   ssize_t ret = -EBADF;
+  struct iattr newattrs;
   struct inode *inode = filp->f_mapping->host;
   shim_target *pvmd = (shim_target *) inode->i_private;
-  if (!pvmd)
-    goto out;
-  if (buf)
+  if ((!pvmd) || (!pvmd->file))
+    {
+      printk (KERN_WARNING "shim_write missing backing file\n");
+      goto out;
+    }
+  backing_dentry = pvmd->file->f_path.dentry;
+  shim_dentry = filp->f_path.dentry;
+  if (buf && backing_dentry && shim_dentry)
     {
       old_fs = get_fs ();
       set_fs (KERNEL_DS);
       ret = kernel_write (pvmd->file, (char __user *) buf, len, skip);
       set_fs (old_fs);
+// Update backing file and shim target size attributes...
+      newattrs.ia_size = ret;
+      newattrs.ia_file = pvmd->file;
+      newattrs.ia_valid = ATTR_SIZE | ATTR_FILE;
+      inode_lock (backing_dentry->d_inode);
+      notify_change (backing_dentry, &newattrs, NULL);  // XXX should check return here
+      inode_unlock (backing_dentry->d_inode);
+      newattrs.ia_file = filp;
+      inode_lock (shim_dentry->d_inode);
+      notify_change (shim_dentry, &newattrs, NULL);
+      inode_unlock (shim_dentry->d_inode);
+
       if (verbose)
-        printk (KERN_INFO "shim_write to backing file %s\n", pvmd->path);
+        printk (KERN_INFO "shim_write %lld bytes to backing file %s\n",
+                (long long) ret, pvmd->path);
     }
 out:
   return ret;
@@ -393,7 +413,7 @@ shim_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
   struct kstat stat;
   mm_segment_t old_fs = get_fs ();
   set_fs (KERNEL_DS);
-  error = vfs_stat ((char *) symname, &stat);
+  error = vfs_stat ((char *) symname, &stat); // XXX do we really need to use vfs_stat?
   set_fs (old_fs);
   if (error)
     {
@@ -410,7 +430,6 @@ shim_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
       kfree (pvmd);
       goto end;
     }
-  pvmd->max_size = stat.size;
 
   inode = shim_iget (dir->i_sb, j);
   inode->i_mode = stat.mode;
@@ -686,7 +705,7 @@ shim_writepages (struct address_space *mapping, struct writeback_control *wbc)
                         }
                       buf = vmap (&p[start], m, VM_MAP, PAGE_KERNEL);
                       if (!buf)
-                        goto out;  //XXX XXX what about thoselocked pages?
+                        goto out;       // XXX XXX what about those locked pages? FIX
                       write_block (pvmd->file, (char __user *) buf, m,
                                    offset);
                       vunmap (buf);
@@ -719,7 +738,7 @@ shim_writepages (struct address_space *mapping, struct writeback_control *wbc)
       buf = vmap (&p[start], m, VM_MAP, PAGE_KERNEL);
       if (!buf)
         goto out;
-                          //XXX XXX what about thoselocked pages?
+      // XXX XXX what about those locked pages? FIX
       write_block (pvmd->file, (char __user *) buf, m, offset);
       vunmap (buf);
       spin_lock_irq (&mapping->private_lock);
@@ -867,12 +886,12 @@ shim_readpage (struct file *file, struct page *page)
       if (verbose)
         printk (KERN_INFO "shim_readpage offset=%ld, page_addr=%p\n",
                 (long) offset, page_addr);
-          old_fs = get_fs ();
-          set_fs (KERNEL_DS);
-          j =
-            kernel_read (pvmd->file, (char __user *) page_addr, PAGE_SIZE,
-                         &offset);
-          set_fs (old_fs);
+      old_fs = get_fs ();
+      set_fs (KERNEL_DS);
+      j =
+        kernel_read (pvmd->file, (char __user *) page_addr, PAGE_SIZE,
+                     &offset);
+      set_fs (old_fs);
       if (verbose)
         printk (KERN_INFO "readpage %d bytes at index %d complete\n", j,
                 (int) page->index);

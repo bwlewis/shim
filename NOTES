@@ -1,3 +1,7 @@
+Use notify_change to update shim file attrs as required (for instance,
+when the target/backing file size changes due to write or truncate).
+
+
 Don't use this on a machine that you value. It will crash.
 
 Linux kernel version used for development/testing: 4.17.11.
