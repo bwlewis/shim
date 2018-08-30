@@ -61,13 +61,13 @@ unsigned int read_ahead = 1024;
 
 /* internal utility functions */
 ssize_t
-write_block (struct file *file, char __user * buf, size_t size, loff_t offset)
+write_block (struct file *file, char __user * buf, size_t size, loff_t * offset)
 {
   ssize_t w;
   mm_segment_t old_fs;
   old_fs = get_fs ();
   set_fs (get_ds ());
-  w = kernel_write (file, buf, size, &offset);
+  w = kernel_write (file, buf, size, offset);
   set_fs (old_fs);
   return w;
 }
@@ -241,7 +241,6 @@ shim_write (struct file * filp, const char __user * buf, size_t len,
 {
   struct dentry *backing_dentry;
   struct dentry *shim_dentry;
-  mm_segment_t old_fs;
   ssize_t ret = -EBADF;
   struct iattr newattrs;
   struct inode *inode = filp->f_mapping->host;
@@ -255,10 +254,7 @@ shim_write (struct file * filp, const char __user * buf, size_t len,
   shim_dentry = filp->f_path.dentry;
   if (buf && backing_dentry && shim_dentry)
     {
-      old_fs = get_fs ();
-      set_fs (KERNEL_DS);
-      ret = kernel_write (pvmd->file, (char __user *) buf, len, skip);
-      set_fs (old_fs);
+      ret = write_block(pvmd->file, (char __user *)buf, len, skip);
 // Update backing file and shim target size attributes...
       newattrs.ia_size = ret;
       newattrs.ia_file = pvmd->file;
@@ -721,7 +717,7 @@ shim_writepages (struct address_space *mapping, struct writeback_control *wbc)
                       if (!buf)
                         goto out;       // XXX XXX what about those locked pages? FIX
                       write_block (pvmd->file, (char __user *) buf, m * PAGE_SIZE,
-                                   offset);
+                                   &offset);
                       vunmap (buf);
                       spin_lock_irq (&mapping->private_lock);
                       for (k = 0; k < m; ++k)
@@ -753,7 +749,7 @@ shim_writepages (struct address_space *mapping, struct writeback_control *wbc)
       if (!buf)
         goto out;
       // XXX XXX what about those locked pages? FIX
-      write_block (pvmd->file, (char __user *) buf, m * PAGE_SIZE, offset);
+      write_block (pvmd->file, (char __user *) buf, m * PAGE_SIZE, &offset);
       vunmap (buf);
       spin_lock_irq (&mapping->private_lock);
       for (k = 0; k < m; ++k)
