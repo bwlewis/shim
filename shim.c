@@ -218,11 +218,7 @@ shim_file_read_iter (struct kiocb * iocb, struct iov_iter * iter)
  *
  * The shim_write function passes usual write operations to the backing file.
  * XXX
- * XXX This may not make any sense. Instead:
- * 1. release any open target file descriptor
- * 2. pass write through to target file
- * 3. re-open target file descriptor (as in symlink)
-  
+ * XXX This may not make any sense.
  */
 ssize_t
 shim_write (struct file * filp, const char __user * buf, size_t len,
@@ -649,6 +645,7 @@ shim_writepages (struct address_space *mapping, struct writeback_control *wbc)
   start = 0;
   end = -1;
   p = kmalloc (sizeof (struct page *) * read_ahead, GFP_NOFS);
+// XXX check nomem
   if (wbc->range_cyclic)
     index = mapping->writeback_index;
   else
@@ -689,7 +686,7 @@ shim_writepages (struct address_space *mapping, struct writeback_control *wbc)
                         }
                       buf = vmap (&p[start], m, VM_MAP, PAGE_KERNEL);
                       if (!buf)
-                        goto out;
+                        goto out;  //XXX XXX what about thoselocked pages?
                       write_block (pvmd->file, (char __user *) buf, m,
                                    offset);
                       vunmap (buf);
@@ -722,6 +719,7 @@ shim_writepages (struct address_space *mapping, struct writeback_control *wbc)
       buf = vmap (&p[start], m, VM_MAP, PAGE_KERNEL);
       if (!buf)
         goto out;
+                          //XXX XXX what about thoselocked pages?
       write_block (pvmd->file, (char __user *) buf, m, offset);
       vunmap (buf);
       spin_lock_irq (&mapping->private_lock);
@@ -848,6 +846,11 @@ shim_readpage (struct file *file, struct page *page)
   int j;
   struct inode *inode = file->f_mapping->host;
   shim_target *pvmd = (shim_target *) inode->i_private;
+  if ((!pvmd) || (!pvmd->file))
+    {
+      printk (KERN_WARNING "shim_readpage no backing file\n");
+      return -1;
+    }
   if (verbose)
     printk (KERN_INFO "shim_readpage %d %s %ld [%s] [%s] [%s]\n",
             (int) page->index,
@@ -864,15 +867,12 @@ shim_readpage (struct file *file, struct page *page)
       if (verbose)
         printk (KERN_INFO "shim_readpage offset=%ld, page_addr=%p\n",
                 (long) offset, page_addr);
-      if (pvmd->file)
-        {
           old_fs = get_fs ();
           set_fs (KERNEL_DS);
           j =
             kernel_read (pvmd->file, (char __user *) page_addr, PAGE_SIZE,
                          &offset);
           set_fs (old_fs);
-        }
       if (verbose)
         printk (KERN_INFO "readpage %d bytes at index %d complete\n", j,
                 (int) page->index);
