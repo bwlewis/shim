@@ -15,11 +15,11 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  *
- * Pvshm is an experimental overlay file system that intercepts memory-mapped 
- * operations and replaces them with file read/write calls to another file 
- * system. Pvshm is designed to provide basic mmap support over file systems
- * that don't natively support mmap. Basic read and write operations are
- * simply passed-through to the backing file system.
+ * The shim is an experimental overlay file system that intercepts
+ * memory-mapped operations and replaces them with file read/write calls to
+ * another file system. Shim is designed to provide basic mmap support over
+ * file systems that don't natively support mmap. Basic read and write
+ * operations are simply passed-through to the backing file system.
  *
  * OK, I know what you're about to ask: why not just use fuse? The fuse
  * (experimental) writable mmap code is not easy to follow, and is focused
@@ -441,7 +441,7 @@ shim_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
           if (verbose)
             printk (KERN_INFO "shim_symlink symname=%s unable to open\n",
                     symname);
-          kfree(pvmd->path);
+          kfree (pvmd->path);
           kfree (pvmd);
           pvmd = NULL;
         }
@@ -484,15 +484,25 @@ static struct file_system_type shim_fs_type = {
   .owner = THIS_MODULE,
 };
 
+
 static int
 shim_fill_super (struct super_block *sb, void *data, int silent)
 {
   static struct inode *shim_root_inode;
   struct dentry *root;
+  char *fsi;
   int j;
 
   if (verbose)
-    printk (KERN_INFO "shim_fill_super\n");
+    printk (KERN_INFO "shim_fill_super opts=%s\n", (char *) data);
+  fsi = (char *) kzalloc (PAGE_SIZE, GFP_KERNEL);
+  if (!fsi)
+    return -ENOMEM;
+  if (data)
+    snprintf (fsi, PAGE_SIZE, "%s", (char *) data);
+  else
+    snprintf (fsi, PAGE_SIZE, "/tmp");
+  sb->s_fs_info = fsi;
   sb->s_maxbytes = MAX_LFS_FILESIZE;
   sb->s_blocksize = PAGE_SIZE;
   sb->s_blocksize_bits = PAGE_SHIFT;
@@ -505,7 +515,7 @@ shim_fill_super (struct super_block *sb, void *data, int silent)
     return j;
   sb->s_bdi->ra_pages = read_ahead;
   if (verbose)
-    printk (KERN_INFO "sb->s_bdi->ra_pages = %u\n", read_ahead);
+    printk (KERN_INFO "sb->s_bdi->ra_pages=%u opts=%s\n", read_ahead, fsi);
   shim_root_inode = shim_get_inode (sb, S_IFDIR | 0755, 0);
   if (!shim_root_inode)
     return -ENOMEM;
@@ -886,6 +896,8 @@ init_shim_fs (void)
   return j;
 }
 
+
+// XXX LEAKING private data here...clean up XXX XXX FIX ME
 static void __exit
 exit_shim_fs (void)
 {

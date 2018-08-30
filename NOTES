@@ -2,6 +2,16 @@ Linux kernel version used for development/testing: 4.17.11.
 See git branches for other kernel versions.
 
 ---
+Maybe we should get rid of the generic link idea and switch to
+something like overlayfs that sits above another mount point?
+Just an idea...but that would be a big re-write :(
+
+Adding an experimental mount -o option, where option is a default path to create
+files. This will buy some time with the link approach. We can, at mount time,
+specify where to populate links. This is very preliminary...
+
+
+---
 There is a new kernel parameter 'read_ahead' that defaults to 1024 pages. Use
 it to set the number of read ahead pages.
 ---
@@ -44,4 +54,5 @@ shim_read is unused, other file operations incomplete
 linking read-only file works, but readpages crashes. ??
 
 filp_open seems to open read-only files with O_RDWR flag without error?
+
 
