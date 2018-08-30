@@ -285,6 +285,8 @@ struct inode *
 shim_get_inode (struct super_block *sb, umode_t mode, dev_t dev)
 {
   struct inode *inode = new_inode (sb);
+  if (verbose)
+    printk (KERN_INFO "shim_get_inode\n");
   if (inode)
     {
       inode->i_mode = mode;

@@ -27,6 +27,7 @@ main (int argc, char **argv)
       printf ("open error %d\n", fd);
       return fd;
     }
+  ftruncate(fd, 150000);
   fstat (fd, &sbuffer);
   n = sbuffer.st_size / 4096;
   printf("reading %d pages from %d\n",n,fd);
@@ -36,12 +37,15 @@ main (int argc, char **argv)
 /* read */
   memcpy((void *)B, A, 4096 * n);
 
+  printf("reverse msync\n");
+
   /* 'reverse' msync -- force update of the specified page cache range from the
    * backing file. In this example we force update of pages 1, 2, 3 and 4.
    */
   lseek(fd, 4097, SEEK_SET);
   read(fd, NULL, 9184);
 
+  printf("write\n");
 /* write */
   sprintf(A, "Homer is a chicken\n", NULL);
   printf(A);

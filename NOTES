@@ -14,6 +14,19 @@ specify where to populate links. This is very preliminary...
 
 Right now the default path is /tmp if no option is specified.
 
+NEXT, lazily check for NULL backing files as required and populate in the
+mount option path when necessary.
+
+---
+
+TRUNCATE
+
+Handling truncate/ftruncate is tricky since it does not go directly
+through any of the module functions.
+
+Instead consider adding a backing file/shim file size check every
+time a writepage is called? If mis-matched, then adjust the backing
+file with truncate as required...just an idea.
 
 ---
 The module parameter 'read_ahead' that defaults to 1024 pages. Use
