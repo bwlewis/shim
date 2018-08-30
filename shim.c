@@ -61,10 +61,14 @@ unsigned int read_ahead = 1024;
 
 /* internal utility functions */
 ssize_t
-write_block (struct file *file, char __user * buf, size_t size, loff_t * offset)
+write_block (struct file *file, char __user * buf, size_t size,
+             loff_t * offset)
 {
   ssize_t w;
   mm_segment_t old_fs;
+  if (verbose)
+    printk (KERN_DEBUG "shim write_block to file %s",
+            file->f_path.dentry->d_name.name);
   old_fs = get_fs ();
   set_fs (get_ds ());
   w = kernel_write (file, buf, size, offset);
@@ -78,12 +82,14 @@ create_and_truncate (const char *pathname, loff_t length)
   struct path path;
   int error = -EINVAL;
   unsigned int lookup_flags = LOOKUP_FOLLOW;
-  if (length < 0) return error;
-  error = user_path_at(AT_FDCWD, pathname, lookup_flags, &path);
-  if (!error) {
-    error = vfs_truncate(&path, length);
-    path_put(&path);
-  }
+  if (length < 0)
+    return error;
+  error = user_path_at (AT_FDCWD, pathname, lookup_flags, &path);
+  if (!error)
+    {
+      error = vfs_truncate (&path, length);
+      path_put (&path);
+    }
   return error;
 }
 
@@ -119,7 +125,7 @@ ssize_t shim_file_read_iter (struct kiocb *, struct iov_iter *);
  */
 typedef struct
 {
-  char *path;
+  char path[4096];
   struct file *file;
 } shim_target;
 
@@ -245,16 +251,25 @@ shim_write (struct file * filp, const char __user * buf, size_t len,
   struct iattr newattrs;
   struct inode *inode = filp->f_mapping->host;
   shim_target *pvmd = (shim_target *) inode->i_private;
+  shim_dentry = filp->f_path.dentry;
   if ((!pvmd) || (!pvmd->file))
     {
-      printk (KERN_WARNING "shim_write missing backing file\n");
-      goto out;
+      if (!pvmd)
+        pvmd = (shim_target *) kmalloc (sizeof (shim_target), 0);
+      snprintf (pvmd->path, PAGE_SIZE, "%s/%s",
+                (char *) inode->i_sb->s_fs_info, shim_dentry->d_name.name);
+      pvmd->file =
+        filp_open (pvmd->path, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+      if (!pvmd->file)
+        {
+          printk (KERN_WARNING "shim_write unable to create backing file\n");
+          goto out;
+        }
     }
   backing_dentry = pvmd->file->f_path.dentry;
-  shim_dentry = filp->f_path.dentry;
   if (buf && backing_dentry && shim_dentry)
     {
-      ret = write_block(pvmd->file, (char __user *)buf, len, skip);
+      ret = write_block (pvmd->file, (char __user *) buf, len, skip);
 // Update backing file and shim target size attributes...
       newattrs.ia_size = ret;
       newattrs.ia_file = pvmd->file;
@@ -403,7 +418,6 @@ shim_unlink (struct inode *dir, struct dentry *d)
         printk (KERN_INFO "shim_unlink %s\n", pvmd->path);
       if (pvmd->file)
         filp_close (pvmd->file, current->files);
-      kfree (pvmd->path);
       kfree (pvmd);
     }
   return simple_unlink (dir, d);
@@ -425,7 +439,7 @@ shim_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
   struct kstat stat;
   mm_segment_t old_fs = get_fs ();
   set_fs (KERNEL_DS);
-  error = vfs_stat ((char *) symname, &stat); // XXX do we really need to use vfs_stat?
+  error = vfs_stat ((char *) symname, &stat);   // XXX do we really need to use vfs_stat?
   set_fs (old_fs);
   if (error)
     {
@@ -454,15 +468,14 @@ shim_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
             dentry->d_name.name, symname);
   if (inode)
     {
-      int l = strlen (symname) + 1;
+      int l = strlen (symname);
 /* We don't do this: page_symlink(inode, symname, l);
  * The standard approach of putting the symlink name in page 0 does not 
  * work in this case since we use all pages in the mapping.  We allocate 
  * space for the file name and store it in the inode private field.
  */
       error = 0;
-      pvmd->path = (char *) kmalloc (l, 0);
-      memcpy (pvmd->path, symname, l);
+      strncpy (pvmd->path, symname, min ((int) PAGE_SIZE, l));
       pvmd->file = filp_open (symname, O_RDWR | O_LARGEFILE, 0);
       if (!pvmd->file)
         {
@@ -470,7 +483,6 @@ shim_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
           if (verbose)
             printk (KERN_INFO "shim_symlink symname=%s unable to open\n",
                     symname);
-          kfree (pvmd->path);
           kfree (pvmd);
           pvmd = NULL;
         }
@@ -620,7 +632,9 @@ shim_writepage (struct page *page, struct writeback_control *wbc)
  * speedier page_addr = kmap_atomic (page, KM_USER0).
  */
       page_addr = kmap (page);
-      j = write_block (pvmd->file, (char __user*) page_addr, PAGE_SIZE, &offset);
+      j =
+        write_block (pvmd->file, (char __user *) page_addr, PAGE_SIZE,
+                     &offset);
       kunmap (page);
     }
 
@@ -685,8 +699,7 @@ shim_writepages (struct address_space *mapping, struct writeback_control *wbc)
       if (n == 0)
         break;
       if (verbose)
-        printk (KERN_INFO
-                "shim_writepages ndirty=%d index=%ld\n", n, index);
+        printk (KERN_INFO "shim_writepages ndirty=%d index=%ld\n", n, index);
 /* Search the array of dirty pages for contiguous blocks */
       if (n > 1)
         {
@@ -711,8 +724,8 @@ shim_writepages (struct address_space *mapping, struct writeback_control *wbc)
                       buf = vmap (&p[start], m, VM_MAP, PAGE_KERNEL);
                       if (!buf)
                         goto out;       // XXX XXX what about those locked pages? FIX
-                      write_block (pvmd->file, (char __user *) buf, m * PAGE_SIZE,
-                                   &offset);
+                      write_block (pvmd->file, (char __user *) buf,
+                                   m * PAGE_SIZE, &offset);
                       vunmap (buf);
                       spin_lock_irq (&mapping->private_lock);
                       for (k = 0; k < m; ++k)
@@ -923,7 +936,7 @@ init_shim_fs (void)
 }
 
 
-// XXX LEAKING private data here...clean up XXX XXX FIX ME
+// XXX LEAKING private data here?...clean up XXX XXX FIX ME
 static void __exit
 exit_shim_fs (void)
 {
