@@ -31,6 +31,7 @@
 #include <linux/version.h>
 #include <linux/module.h>
 #include <linux/fs.h>
+#include <linux/namei.h>
 #include <linux/fcntl.h>
 #include <linux/file.h>
 #include <linux/statfs.h>
@@ -58,17 +59,32 @@
 int verbose = 1;
 unsigned int read_ahead = 1024;
 
-// Used by writepages
+/* internal utility functions */
 ssize_t
-write_block (struct file *file, char __user * buf, int m, loff_t offset)
+write_block (struct file *file, char __user * buf, size_t size, loff_t offset)
 {
   ssize_t w;
   mm_segment_t old_fs;
   old_fs = get_fs ();
   set_fs (get_ds ());
-  w = kernel_write (file, buf, m * PAGE_SIZE, &offset);
+  w = kernel_write (file, buf, size, &offset);
   set_fs (old_fs);
   return w;
+}
+
+int
+create_and_truncate (const char *pathname, loff_t length)
+{
+  struct path path;
+  int error = -EINVAL;
+  unsigned int lookup_flags = LOOKUP_FOLLOW;
+  if (length < 0) return error;
+  error = user_path_at(AT_FDCWD, pathname, lookup_flags, &path);
+  if (!error) {
+    error = vfs_truncate(&path, length);
+    path_put(&path);
+  }
+  return error;
 }
 
 /* Superblock and file inode operations */
@@ -629,13 +645,12 @@ shim_writepage (struct page *page, struct writeback_control *wbc)
   if (verbose)
     printk
       (KERN_INFO
-       "shim_writepage: %d link=%s [%s] [%s] [%s] [%s] count %d nr_to_write %ld\n",
+       "shim_writepage: %d link=%s [%s] [%s] [%s] [%s] count %d\n",
        (int) page->index, (char *) pvmd->path,
        PageUptodate (page) ? "Uptodate" : "Not Uptodate",
        PageDirty (page) ? "Dirty" : "Not Dirty",
        PagePrivate (page) ? "Private" : "Not Private",
-       PageLocked (page) ? "Locked" : "Unlocked", page_count (page),
-       wbc->nr_to_write);
+       PageLocked (page) ? "Locked" : "Unlocked", page_count (page));
 
   wbc->nr_to_write -= 1;
   if (wbc->sync_mode == WB_SYNC_NONE)
@@ -680,8 +695,7 @@ shim_writepages (struct address_space *mapping, struct writeback_control *wbc)
         break;
       if (verbose)
         printk (KERN_INFO
-                "shim_writepages ndirty=%d index=%ld nr_to_write=%ld\n", n,
-                index, wbc->nr_to_write);
+                "shim_writepages ndirty=%d index=%ld\n", n, index);
 /* Search the array of dirty pages for contiguous blocks */
       if (n > 1)
         {
@@ -706,7 +720,7 @@ shim_writepages (struct address_space *mapping, struct writeback_control *wbc)
                       buf = vmap (&p[start], m, VM_MAP, PAGE_KERNEL);
                       if (!buf)
                         goto out;       // XXX XXX what about those locked pages? FIX
-                      write_block (pvmd->file, (char __user *) buf, m,
+                      write_block (pvmd->file, (char __user *) buf, m * PAGE_SIZE,
                                    offset);
                       vunmap (buf);
                       spin_lock_irq (&mapping->private_lock);
@@ -739,7 +753,7 @@ shim_writepages (struct address_space *mapping, struct writeback_control *wbc)
       if (!buf)
         goto out;
       // XXX XXX what about those locked pages? FIX
-      write_block (pvmd->file, (char __user *) buf, m, offset);
+      write_block (pvmd->file, (char __user *) buf, m * PAGE_SIZE, offset);
       vunmap (buf);
       spin_lock_irq (&mapping->private_lock);
       for (k = 0; k < m; ++k)

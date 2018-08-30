@@ -27,7 +27,7 @@ main (int argc, char **argv)
       printf ("open error %d\n", fd);
       return fd;
     }
-  ftruncate(fd, 150000);
+//  ftruncate(fd, 150000); // XXX
   fstat (fd, &sbuffer);
   n = sbuffer.st_size / 4096;
   printf("reading %d pages from %d\n",n,fd);
@@ -45,18 +45,23 @@ main (int argc, char **argv)
   lseek(fd, 4097, SEEK_SET);
   read(fd, NULL, 9184);
 
-  printf("write\n");
+  printf("write %d\n", sbuffer.st_size);
 /* write */
   sprintf(A, "Homer is a chicken\n", NULL);
   printf(A);
-  printf("%d\n", syncfs(fd));
-  printf("%d\n", fsync(fd));
-  printf("%d\n", fdatasync(fd));
+  printf("msync %d\n", msync(A, sbuffer.st_size, MS_SYNC));
+  memset(A, 65, sbuffer.st_size);
+  printf("msync %d\n", msync(A, sbuffer.st_size, MS_INVALIDATE | MS_SYNC));
+  memset(A, 0, sbuffer.st_size);
+  printf("msync %d\n", msync(A, sbuffer.st_size, MS_SYNC));
   munmap((void *)A, sbuffer.st_size);
 
+/*
+  lseek(fd, 0, SEEK_SET);
   write(fd, "silly", 5);
   lseek(fd, 0, SEEK_SET);
   read(fd, NULL, 4096);
+*/
   close(fd);
   free(B);
   return 0;
