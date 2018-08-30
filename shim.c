@@ -605,7 +605,6 @@ shim_writepage (struct page *page, struct writeback_control *wbc)
 {
   ssize_t j;
   loff_t offset;
-  mm_segment_t old_fs;
   struct inode *inode;
   void *page_addr;
   shim_target *pvmd;
@@ -617,15 +616,11 @@ shim_writepage (struct page *page, struct writeback_control *wbc)
   test_set_page_writeback (page);
   if (pvmd->file)
     {
-/* NB. We unfortunately can't use vfs_write inside an atomic section,
- * precluding the speedier page_addr = kmap_atomic (page, KM_USER0).
+/* NB. can't use vfs_write inside an atomic section, precluding use ofthe
+ * speedier page_addr = kmap_atomic (page, KM_USER0).
  */
       page_addr = kmap (page);
-      old_fs = get_fs ();
-      set_fs (get_ds ());
-      j = kernel_write (pvmd->file, (char __user *) page_addr,
-                        PAGE_SIZE, &offset);
-      set_fs (old_fs);
+      j = write_block (pvmd->file, (char __user*) page_addr, PAGE_SIZE, &offset);
       kunmap (page);
     }
 
