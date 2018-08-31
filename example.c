@@ -56,6 +56,8 @@ main (int argc, char **argv)
   printf("msync %d\n", msync(A, sbuffer.st_size, MS_INVALIDATE | MS_SYNC));
   memset(A, 0, sbuffer.st_size);
   printf("msync %d\n", msync(A, sbuffer.st_size, MS_SYNC));
+  sprintf(A, "Homer is a chicken\n", NULL);
+  printf("msync %d\n", msync(A, sbuffer.st_size, MS_SYNC));
   munmap((void *)A, sbuffer.st_size);
 
 /*

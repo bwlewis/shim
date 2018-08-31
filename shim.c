@@ -56,7 +56,7 @@
 #define PVSHM_MAGIC	0x55566655
 #define list_to_page(head) (list_entry((head)->prev, struct page, lru))
 
-int verbose = 1;
+int verbose = 0;
 unsigned int read_ahead = 1024;
 
 /* internal utility functions */
@@ -404,27 +404,29 @@ shim_create (struct inode *dir, struct dentry *dentry, umode_t mode,
 static int
 shim_unlink (struct inode *dir, struct dentry *d)
 {
-  struct inode * ino = d->d_inode;
-  struct inode * backing_inode;
-  struct dentry * backing_dentry;
+  struct inode *ino = d->d_inode;
+  struct inode *backing_inode;
+  struct dentry *backing_dentry;
   shim_target *pvmd = (shim_target *) ino->i_private;
   if (pvmd)
     {
       if (verbose)
         printk (KERN_INFO "shim_unlink %s\n", d->d_name.name);
       if (pvmd->file)
-      {
-        if (pvmd->created)
         {
-          backing_inode = pvmd->file->f_inode;
-          backing_dentry = pvmd->file->f_path.dentry;
-          filp_close (pvmd->file, current->files);
-          drop_nlink(backing_inode);
-          dput(backing_dentry);
-          printk("unlink regular file %s\n", pvmd->path);
+          if (pvmd->created)
+            {
+              backing_inode = pvmd->file->f_inode;
+              backing_dentry = pvmd->file->f_path.dentry;
+              filp_close (pvmd->file, current->files);
+              drop_nlink (backing_inode);
+              dput (backing_dentry);
+              if (verbose)
+                printk ("unlink regular file %s\n", pvmd->path);
+            }
+          else
+            filp_close (pvmd->file, current->files);
         }
-        else filp_close (pvmd->file, current->files);
-      }
       kfree (pvmd);
     }
   return simple_unlink (dir, d);
