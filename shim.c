@@ -76,22 +76,6 @@ write_block (struct file *file, char __user * buf, size_t size,
   return w;
 }
 
-int
-create_and_truncate (const char *pathname, loff_t length)
-{
-  struct path path;
-  int error = -EINVAL;
-  unsigned int lookup_flags = LOOKUP_FOLLOW;
-  if (length < 0)
-    return error;
-  error = user_path_at (AT_FDCWD, pathname, lookup_flags, &path);
-  if (!error)
-    {
-      error = vfs_truncate (&path, length);
-      path_put (&path);
-    }
-  return error;
-}
 
 /* Superblock and file inode operations */
 const struct inode_operations shim_dir_inode_operations;
@@ -127,6 +111,7 @@ typedef struct
 {
   char path[4096];
   struct file *file;
+  int created;
 } shim_target;
 
 
@@ -237,9 +222,8 @@ shim_file_read_iter (struct kiocb * iocb, struct iov_iter * iter)
 
 /* shim_write
  *
- * The shim_write function passes usual write operation to
- * the backing file, adjusting the inode size of both the backing and
- * the shim entries.
+ * Pass the usual write operation through to the backing file,
+ * adjusting the inode size of both the backing and the shim entries.
  */
 ssize_t
 shim_write (struct file * filp, const char __user * buf, size_t len,
@@ -254,34 +238,21 @@ shim_write (struct file * filp, const char __user * buf, size_t len,
   shim_dentry = filp->f_path.dentry;
   if ((!pvmd) || (!pvmd->file))
     {
-      if (!pvmd)
-        pvmd = (shim_target *) kmalloc (sizeof (shim_target), 0);
-      snprintf (pvmd->path, PAGE_SIZE, "%s/%s",
-                (char *) inode->i_sb->s_fs_info, shim_dentry->d_name.name);
-      pvmd->file =
-        filp_open (pvmd->path, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
-      if (!pvmd->file)
-        {
-          printk (KERN_WARNING "shim_write unable to create backing file\n");
-          goto out;
-        }
+      printk (KERN_WARNING "shim_write unable to access backing file\n");
+      goto out;
     }
   backing_dentry = pvmd->file->f_path.dentry;
   if (buf && backing_dentry && shim_dentry)
     {
       ret = write_block (pvmd->file, (char __user *) buf, len, skip);
-// Update backing file and shim target size attributes...
       newattrs.ia_size = ret;
-      newattrs.ia_file = pvmd->file;
-      newattrs.ia_valid = ATTR_SIZE | ATTR_FILE;
+      newattrs.ia_valid = ATTR_SIZE;
       inode_lock (backing_dentry->d_inode);
-      notify_change (backing_dentry, &newattrs, NULL);  // XXX should check return here
+      notify_change (backing_dentry, &newattrs, NULL);  // XXX check return
       inode_unlock (backing_dentry->d_inode);
-      newattrs.ia_file = filp;
       inode_lock (shim_dentry->d_inode);
       notify_change (shim_dentry, &newattrs, NULL);
       inode_unlock (shim_dentry->d_inode);
-
       if (verbose)
         printk (KERN_INFO "shim_write %lld bytes to backing file %s\n",
                 (long long) ret, pvmd->path);
@@ -366,6 +337,7 @@ shim_get_inode (struct super_block *sb, umode_t mode, dev_t dev)
 static int
 shim_mknod (struct inode *dir, struct dentry *dentry, umode_t mode, dev_t dev)
 {
+  shim_target *pvmd;
   int error = -ENOSPC;
   struct inode *inode = shim_get_inode (dir->i_sb, mode, dev);
   if (verbose)
@@ -382,6 +354,28 @@ shim_mknod (struct inode *dir, struct dentry *dentry, umode_t mode, dev_t dev)
       d_instantiate (dentry, inode);
       dget (dentry);
       error = 0;
+      /* If we're creating a file in shim, create and associate
+       * a corresponding backing file with it in sb->s_fs_info.
+       */
+      if ((mode & S_IFMT) == S_IFREG)
+        {
+          pvmd = (shim_target *) kmalloc (sizeof (shim_target), 0);
+          snprintf (pvmd->path, PAGE_SIZE, "%s/%s",
+                    (char *) inode->i_sb->s_fs_info, dentry->d_name.name);
+          if (verbose)
+            printk (KERN_INFO "shim_mknod create backing file %s\n",
+                    pvmd->path);
+          pvmd->file =
+            filp_open (pvmd->path, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+          pvmd->created = 1;
+          inode->i_private = pvmd;
+          if (!pvmd->file)
+            {
+              printk (KERN_WARNING
+                      "shim_write unable to create backing file\n");
+              error = -ENOSPC;
+            }
+        }
       dir->i_mtime = dir->i_ctime = current_kernel_time ();
     }
   return error;
@@ -410,14 +404,27 @@ shim_create (struct inode *dir, struct dentry *dentry, umode_t mode,
 static int
 shim_unlink (struct inode *dir, struct dentry *d)
 {
-  struct inode *ino = d->d_inode;
+  struct inode * ino = d->d_inode;
+  struct inode * backing_inode;
+  struct dentry * backing_dentry;
   shim_target *pvmd = (shim_target *) ino->i_private;
   if (pvmd)
     {
       if (verbose)
-        printk (KERN_INFO "shim_unlink %s\n", pvmd->path);
+        printk (KERN_INFO "shim_unlink %s\n", d->d_name.name);
       if (pvmd->file)
-        filp_close (pvmd->file, current->files);
+      {
+        if (pvmd->created)
+        {
+          backing_inode = pvmd->file->f_inode;
+          backing_dentry = pvmd->file->f_path.dentry;
+          filp_close (pvmd->file, current->files);
+          drop_nlink(backing_inode);
+          dput(backing_dentry);
+          printk("unlink regular file %s\n", pvmd->path);
+        }
+        else filp_close (pvmd->file, current->files);
+      }
       kfree (pvmd);
     }
   return simple_unlink (dir, d);
@@ -435,9 +442,9 @@ shim_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
   int error = -ENOSPC;
   ino_t j = iunique (dir->i_sb, 0);
   shim_target *pvmd = (shim_target *) kmalloc (sizeof (shim_target), 0);
-
   struct kstat stat;
   mm_segment_t old_fs = get_fs ();
+
   set_fs (KERNEL_DS);
   error = vfs_stat ((char *) symname, &stat);   // XXX do we really need to use vfs_stat?
   set_fs (old_fs);
@@ -477,6 +484,7 @@ shim_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
       error = 0;
       strncpy (pvmd->path, symname, min ((int) PAGE_SIZE, l));
       pvmd->file = filp_open (symname, O_RDWR | O_LARGEFILE, 0);
+      pvmd->created = 0;
       if (!pvmd->file)
         {
           error = -EBADF;
@@ -486,7 +494,6 @@ shim_symlink (struct inode *dir, struct dentry *dentry, const char *symname)
           kfree (pvmd);
           pvmd = NULL;
         }
-
       inode->i_private = pvmd;
       if (!error)
         {
@@ -626,7 +633,9 @@ shim_writepage (struct page *page, struct writeback_control *wbc)
   offset = page->index << PAGE_SHIFT;
   j = 1;
   test_set_page_writeback (page);
-  if (pvmd->file)
+
+
+  if (pvmd && pvmd->file)
     {
 /* NB. can't use vfs_write inside an atomic section, precluding use ofthe
  * speedier page_addr = kmap_atomic (page, KM_USER0).

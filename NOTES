@@ -1,7 +1,3 @@
-Use notify_change to update shim file attrs as required (for instance,
-when the target/backing file size changes due to write or truncate).
-
-
 Don't use this on a machine that you value. It will crash.
 
 Linux kernel version used for development/testing: 4.17.11.
@@ -16,21 +12,14 @@ Adding an experimental mount -o option, where option is a default path to create
 files. This will buy some time with the link approach. We can, at mount time,
 specify where to populate links. This is very preliminary...
 
-Right now the default path is /tmp if no option is specified.
+Right now the default path is /dev/shm if no option is specified.
 
-NEXT, lazily check for NULL backing files as required and populate in the
+shim checks for missing backing files as required and will create new ones in
 mount option path when necessary.
 
 ---
 
-TRUNCATE
-
-Handling truncate/ftruncate is tricky since it does not go directly
-through any of the module functions.
-
-Instead consider adding a backing file/shim file size check every
-time a writepage is called? If mis-matched, then adjust the backing
-file with truncate as required...just an idea.
+Is truncate working now?
 
 ---
 The module parameter 'read_ahead' that defaults to 1024 pages. Use
@@ -56,24 +45,6 @@ in the page cache to the backing file.
 
 ------------- other bugs and problems -----------------
 
-shim_write (pass-through write to backing file) doesn't make sense and probably
-doesn't work...  for instance, what if the file size changes?
-
-shim_create/shim_mkdir/shim_mknod not working and crashes.
-How to handle file creation (without link)?
 what about directories?
-what about file delete (not unlink)???
 
-Overall, how should file creation, write, truncate, etc. be handled in shim? It
-*would* be nice to support this within shim, somehow, for use with exm.  ???
-
-Many set attribute settings result in crashes. Fix.
-
-shim_read is unused, other file operations incomplete
-
-
-linking read-only file works, but readpages crashes. ??
-
-filp_open seems to open read-only files with O_RDWR flag without error?
-
-
+Some set attribute settings result in crashes. Fix.
