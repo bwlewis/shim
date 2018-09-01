@@ -1,11 +1,13 @@
 THE SHIM FILE SYSTEM
 
 Warning
+-------
 
 Shim is a very experimental Linux kernel module. And it breaks several
 conventions. Don't use it on production machines. It can crash your system!
 
 Rationale
+-------
 
 The shim module defines an intermediary file system for the Linux kernel that
 sits between applications and an underlying file system. The shim module
@@ -23,6 +25,7 @@ of reverse msync).
 
 
 Design
+-------
 
 Loading the shim.ko module enables support for the file system. Shim
 does not use a backing device and is mounted similarly to ramfs and tmpfs
@@ -39,11 +42,22 @@ and de-allocates data structures used by shim internally.  Although memory
 mapping is the main design objective, basic read and write file operations are
 supported for convenience.
 
+New files create in a shim file system also create a new file in a default
+backing file system (see module options below), and link the backing and
+shim files.
+
+Read, write, and truncate operations on shim files are passed through to
+their corresponding backing files.
+
 Writes to the backing file are updated with kernel-page granularity for now.
 Future versions will include byte-addressible backing file updates.
 
+Shim filesystems don't support directories, named pipes or other special
+files (and might crash if you try to use those).
+
 
 Cache consistency
+-------
 
 Shim does not enforce cache consistency between multiple processes mapping the
 same file.
@@ -94,6 +108,7 @@ consensus algorithm for consistency across distributed applications.
 
 
 Example
+-------
 
 # This example creats a one megabyte backing file on the current file system,
 # installs the shim module and creates a shadow file suitable for memory
@@ -109,3 +124,27 @@ ln -s backing_file /mnt
 
 umount /mnt
 rmmod shim
+
+
+Module and mount options
+-------
+
+Module options include
+
+- read_ahead (nonnegative integer)
+  The number of pages to read ahead when memory maps are accessed, defaults to
+  1024. Set this number large for efficient block access, or keep small for
+  workloads with generic r/w access.
+
+- verbose (zero or one)
+  Defaults to 0. Set to 1 to print lots of informative message in the kernel
+  log.
+
+Example:  insmod shim.ko verbose=1 read_ahead=4096
+
+
+There is only one mount option; it specifies the directory that backing
+files shall be created in by default. It defaults to /dev/shm.
+
+Example:  mount -t shim none /mnt -o /tmp
+Example:  mount -t shim none /mnt -o /some/backing/directory
