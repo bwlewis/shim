@@ -1,5 +1,0 @@
-- As is, writers modify whole pages only. Is this a problem?
-- Error checking for mappings exceeding backing file size.
-
-provisionally done:
-- Fix 'reverse sync' hack

@@ -4,6 +4,9 @@ Linux kernel version used for development/testing: 4.17.11.
 See git branches for other kernel versions.
 
 ---
+As is, writers modify whole pages only. Is this a problem?
+
+---
 Maybe we should get rid of the generic link idea and switch to
 something like overlayfs that sits above another mount point?
 Just an idea...but that would be a big re-write :(
@@ -17,9 +20,6 @@ Right now the default path is /dev/shm if no option is specified.
 shim checks for missing backing files as required and will create new ones in
 mount option path when necessary.
 
----
-
-Is truncate working now?
 
 ---
 The module parameter 'read_ahead' that defaults to 1024 pages. Use
@@ -34,8 +34,6 @@ might crash things if attempted. XXX
 The module opens the backing file for read/write as soon as a link is created.
 
 ---
-Memory mappings must not exceed backing file size. (this should be fixed)
-
 
 Issue an lseek/read with a null buffer to update the page cache from the
 backing file (reverse msync).
@@ -45,6 +43,6 @@ in the page cache to the backing file.
 
 ------------- other bugs and problems -----------------
 
-what about directories?
+what about directories? Not implemented and may crash if used...
 
-Some set attribute settings result in crashes. Fix.
+Some set attribute settings result in crashes? Fix.
